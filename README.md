@@ -21,29 +21,29 @@
 
 ## 📖 简介
 
-**biliVideo** 是一款运行在 [AstrBot](https://github.com/Soulter/AstrBot) 上的 B站视频总结插件。
+**biliVideo** 是一款运行在 [AstrBot]((https://astrbot.app/) 上的 B站视频总结插件。
 
 你只需要丢一个B站视频链接，插件就会自动下载音频、提取字幕、调用 AI 大模型，生成一份结构化的视频总结 —— 并渲染成精美的暗色主题卡片图片发送到群聊。
 
 不仅如此，你还可以 **订阅 UP 主**，新视频发布时自动推送总结到群里，再也不怕错过喜欢的 UP 的内容了。
 
-## 🏆 为什么选择 biliVideo？
+## 🏆 biliVideo
 
 | 优势 | 说明 |
 |------|------|
-| 🎨 **颜值即正义** | 总结渲染为双栏暗色卡片图片，视觉效果远超纯文本 |
-| 🧠 **三种总结风格** | 简洁 / 详细 / 专业，满足刷视频、深度学习、内容分析等不同需求 |
-| 📡 **订阅自动推送** | 订阅 UP 主后，新视频第一时间自动推送总结，完全无需手动操作 |
-| 🔍 **智能识别** | 支持完整链接、短链、BV号、UID、空间链接、UP主昵称，怎么发都能识别 |
-| ⏱️ **时间戳标记** | 总结中标注视频对应时间点，方便快速定位 |
-| 🔐 **扫码登录** | 直接在聊天中扫码登录B站，无需手动填写 Cookie |
-| 🛡️ **群聊权限控制** | 黑白名单模式，精细控制哪些群可以使用 |
+| 🎨 **图片渲染输出** | 总结渲染为双栏暗色卡片图片，清晰美观 |
+| 🧠 **三种总结风格** | 简洁 / 详细 / 专业，适用于不同场景 |
+| 📡 **订阅自动推送** | 订阅 UP 主，新视频自动推送总结 |
+| 🔍 **多格式输入** | 支持完整链接、短链、BV号、UID、空间链接、UP主昵称 |
+| ⏱️ **时间戳标记** | 总结中标注视频对应时间点，便于跳转定位 |
+| 🔐 **扫码登录** | 在聊天中扫码登录B站，无需手动填写 Cookie |
+| 🛡️ **群聊权限控制** | 支持黑名单 / 白名单模式 |
 
 ## 📦 安装
 
 ### 前置要求
 
-- [AstrBot](https://github.com/Soulter/AstrBot) v4.0+
+- [AstrBot]((https://astrbot.app/) v4.0+
 - 已配置至少一个 LLM Provider（如 DeepSeek、OpenAI 等）
 
 ### 步骤
@@ -142,6 +142,8 @@ apt install -y wkhtmltopdf
 | `check_interval_minutes` | `600` | 定时检查间隔（分钟） |
 | `max_subscriptions` | `20` | 每个群最大订阅数 |
 | `max_note_length` | `3000` | 总结最大字符数 |
+| `push_groups` | 空 | 推送QQ群列表，逗号分隔 |
+| `push_users` | 空 | 推送QQ号列表，逗号分隔 |
 | `access_mode` | `blacklist` | 群聊访问控制模式 |
 | `group_list` | 空 | 群号列表，逗号分隔 |
 | `debug_mode` | `false` | 启用调试日志 |
@@ -183,25 +185,23 @@ Just send a Bilibili video link to your chat, and the plugin will automatically 
 
 You can also **subscribe to content creators** and receive automatic summary pushes whenever they upload new videos.
 
-## 🏆 Why biliVideo?
+## 🏆 biliVideo
 
 | Advantage | Description |
 |-----------|-------------|
-| 🎨 **Beautiful Output** | Summaries rendered as dual-column dark-themed card images |
-| 🧠 **3 Summary Styles** | Concise / Detailed / Professional for different needs |
+| 🎨 **Image Rendering** | Summaries rendered as dual-column dark-themed card images |
+| 🧠 **3 Summary Styles** | Concise / Detailed / Professional for different scenarios |
 | 📡 **Auto Push** | Subscribe to creators, get summaries pushed automatically |
-| 🔍 **Smart Input** | Accepts full URLs, short links, BV IDs, UIDs, space links, or creator names |
-| ⏱️ **Timestamps** | Key moments marked with video timestamps |
-| 🔐 **QR Login** | Login to Bilibili by scanning a QR code directly in chat |
-| 🛡️ **Access Control** | Blacklist / whitelist modes for group permission management |
-| 🤖 **Any LLM** | Works with DeepSeek / OpenAI / Qwen or any LLM via AstrBot providers |
-| 🆓 **Free & Open Source** | MIT licensed, no additional costs |
+| 🔍 **Multi-format Input** | Accepts full URLs, short links, BV IDs, UIDs, space links, or creator names |
+| ⏱️ **Timestamps** | Key moments marked with video timestamps for quick navigation |
+| 🔐 **QR Login** | Login to Bilibili by scanning a QR code in chat |
+| 🛡️ **Access Control** | Blacklist / whitelist modes |
 
 ## 📦 Installation
 
 ### Prerequisites
 
-- [AstrBot](https://github.com/Soulter/AstrBot) v4.0+
+- [AstrBot]((https://astrbot.app/) v4.0+
 - At least one LLM Provider configured (e.g., DeepSeek, OpenAI)
 
 ### Steps
@@ -264,6 +264,8 @@ Scan the QR code with the Bilibili mobile app.
 | `check_interval_minutes` | `600` | Check interval in minutes |
 | `max_subscriptions` | `20` | Max subscriptions per group |
 | `download_quality` | `fast` | Audio quality: `fast` / `medium` / `slow` |
+| `push_groups` | empty | Push target QQ groups, comma-separated |
+| `push_users` | empty | Push target QQ users, comma-separated |
 | `access_mode` | `blacklist` | Group access control mode |
 | `debug_mode` | `false` | Enable debug logging |
 
