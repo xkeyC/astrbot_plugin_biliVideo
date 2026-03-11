@@ -32,6 +32,7 @@
 | 优势 | 说明 |
 |------|------|
 | 🎨 **图片渲染输出** | 总结渲染为双栏暗色卡片图片，清晰美观 |
+| 📱 **移动端优化** | 支持针对手机阅读优化的大字体紧凑布局 |
 | 🧠 **三种总结风格** | 简洁 / 详细 / 专业，适用于不同场景 |
 | 📡 **订阅自动推送** | 订阅 UP 主，新视频自动推送总结 |
 | 🔍 **多格式输入** | 支持完整链接、短链、BV号、UID、空间链接、UP主昵称 |
@@ -58,10 +59,9 @@
 ```bash
 # FFmpeg（必须 — 用于音频处理）
 apt install -y ffmpeg
-
-# wkhtmltopdf（开启图片输出时需要）
-apt install -y wkhtmltopdf
 ```
+
+> **📝 图片输出**：首次使用图片输出功能时，插件会自动安装 Playwright Chromium 浏览器（约 150MB）.
 
 **3. 登录B站**
 
@@ -141,6 +141,7 @@ apt install -y wkhtmltopdf
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `output_image` | `true` | 总结以图片形式发送 |
+| `mobile_output` | `false` | 移动端优化输出（更大字体、紧凑布局） |
 | `note_style` | `professional` | 总结风格：`concise` / `detailed` / `professional` |
 | `enable_link` | `true` | 嵌入时间戳标记 |
 | `enable_summary` | `true` | 末尾添加 AI 总结段落 |
@@ -168,14 +169,13 @@ apt install -y wkhtmltopdf
 | 依赖 | 类型 | 用途 |
 |------|------|------|
 | **FFmpeg** | 系统 | 音频下载处理 (**必须**) |
-| **wkhtmltopdf** | 系统 | 图片渲染 (开启图片输出时需要) |
+| **Playwright** | Python | 图片渲染（首次使用自动安装 Chromium） |
 | yt-dlp | Python | B站视频/音频下载 |
 | aiohttp | Python | 异步 HTTP 请求 |
 | requests | Python | HTTP 请求 |
 | markdown | Python | Markdown → HTML |
-| imgkit | Python | HTML → 图片 |
 
-> Python 依赖会在插件安装时自动安装。
+> Python 依赖和 Playwright Chromium 浏览器会在插件首次使用图片输出时自动安装。
 
 ## ⚠️ 注意事项
 
@@ -205,6 +205,7 @@ You can also **subscribe to content creators** and receive automatic summary pus
 | Advantage | Description |
 |-----------|-------------|
 | 🎨 **Image Rendering** | Summaries rendered as dual-column dark-themed card images |
+| 📱 **Mobile Optimized** | Optional mobile-friendly layout with larger fonts and compact design |
 | 🧠 **3 Summary Styles** | Concise / Detailed / Professional for different scenarios |
 | 📡 **Auto Push** | Subscribe to creators, get summaries pushed automatically |
 | 🔍 **Multi-format Input** | Accepts full URLs, short links, BV IDs, UIDs, space links, or creator names |
@@ -231,10 +232,9 @@ Upload the plugin zip in AstrBot Admin → Plugin Management → Restart AstrBot
 ```bash
 # FFmpeg (required — for audio processing)
 apt install -y ffmpeg
-
-# wkhtmltopdf (required for image output)
-apt install -y wkhtmltopdf
 ```
+
+> **📝 Image Output**: Playwright Chromium browser (~150MB) will be auto-installed on first use of image output. No need to manually install wkhtmltopdf.
 
 **3. Login to Bilibili**
 
@@ -276,6 +276,7 @@ Scan the QR code with the Bilibili mobile app.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `output_image` | `true` | Send summary as image |
+| `mobile_output` | `false` | Mobile-optimized output (larger font, compact layout) |
 | `note_style` | `professional` | Style: `concise` / `detailed` / `professional` |
 | `enable_auto_push` | `false` | Enable automatic new video push |
 | `check_interval_minutes` | `600` | Check interval in minutes |

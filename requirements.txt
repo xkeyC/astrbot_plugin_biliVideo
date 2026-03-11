@@ -2,5 +2,5 @@ yt-dlp
 aiohttp
 requests
 markdown
-imgkit
+playwright
 segno

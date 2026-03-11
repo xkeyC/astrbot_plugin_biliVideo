@@ -101,7 +101,13 @@
     "description": "总结以图片形式发送",
     "type": "bool",
     "default": true,
-    "hint": "开启后总结将渲染为精美图片发送（需要安装 wkhtmltopdf），关闭则发送纯文本"
+    "hint": "开启后总结将渲染为精美图片发送（首次使用会自动安装 Playwright Chromium），关闭则发送纯文本"
+  },
+  "mobile_output": {
+    "description": "移动端优化输出",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后图片输出将针对移动端优化（更大字体、更紧凑布局、更适合手机阅读）"
   },
   "check_interval_minutes": {
     "description": "定时检查新视频间隔 (分钟)",

@@ -20,7 +20,8 @@ from .services.bilibili_api import get_up_info, get_latest_videos, search_up_by_
 from .services.bilibili_login import BilibiliLogin
 from .services.note_service import NoteService
 from .utils.url_parser import detect_platform, extract_bilibili_mid
-from .utils.md_to_image import render_note_image
+from .utils.md_to_image import render_note_image_async
+from .utils.env_manager import EnvManager
 
 
 class BiliVideoPlugin(Star):
@@ -44,6 +45,10 @@ class BiliVideoPlugin(Star):
 
         self._log("══════ [BiliVideo] 插件初始化开始 ══════")
         self._log(f"配置内容: { {k: v for k, v in self.config.items() if k not in ('cookies',)} }")
+
+        # Playwright 环境管理器
+        self.env_manager = EnvManager(self.data_dir)
+        self._playwright_ready = False
 
         # B站扫码登录服务
         self.bili_login = BilibiliLogin(self.data_dir)
@@ -104,6 +109,21 @@ class BiliVideoPlugin(Star):
         """Debug 日志输出 —— 使用 logger.info 确保始终可见"""
         if self._debug_mode:
             logger.info(f"[BiliVideo/DBG] {msg}")
+
+    async def _init_playwright(self):
+        """初始化 Playwright 环境"""
+        if self.env_manager.is_installed():
+            self._playwright_ready = True
+            self._log("[Playwright] 已安装，跳过初始化")
+            return True
+
+        try:
+            await self.env_manager.install_dependencies()
+            self._playwright_ready = self.env_manager.is_installed()
+            return self._playwright_ready
+        except Exception as e:
+            logger.error(f"Playwright 初始化失败: {e}")
+            return False
 
     def _load_push_targets_from_config(self):
         """从配置文件加载推送目标到 SubscriptionManager"""
@@ -175,7 +195,7 @@ class BiliVideoPlugin(Star):
         parts = str(message_str).strip().split(maxsplit=1)
         return parts[1].strip() if len(parts) > 1 else ""
 
-    def _render_and_get_chain(self, note_text: str):
+    async def _render_and_get_chain(self, note_text: str):
         """
         将总结渲染为图片并返回消息链组件，或回退到纯文本。
 
@@ -185,13 +205,23 @@ class BiliVideoPlugin(Star):
             self._log("[Render] output_image=False, 使用纯文本")
             return note_text
 
+        # 初始化 Playwright（首次使用时）
+        if not self._playwright_ready:
+            self._log("[Render] 首次使用，初始化 Playwright...")
+            if not await self._init_playwright():
+                self._log("[Render] Playwright 初始化失败, 回退到纯文本")
+                return note_text
+
         # 生成唯一文件名
         import time
         img_filename = f"note_{int(time.time() * 1000)}.png"
         img_path = os.path.join(self.data_dir, "images", img_filename)
 
-        self._log(f"[Render] 开始渲染图片: {img_path}")
-        result = render_note_image(note_text, img_path)
+        # 获取移动端输出设置
+        is_mobile = bool(self.config.get("mobile_output", False))
+        self._log(f"[Render] 开始渲染图片: {img_path}, mobile={is_mobile}")
+
+        result = await render_note_image_async(note_text, img_path, is_mobile=is_mobile)
 
         if result and os.path.exists(result):
             self._log(f"[Render] 图片渲染成功: {os.path.getsize(result)} bytes")
@@ -407,7 +437,7 @@ class BiliVideoPlugin(Star):
                 yield event.plain_result("⏳ 正在生成视频总结...")
                 try:
                     note = await self._generate_note(video_url)
-                    result = self._render_and_get_chain(note)
+                    result = await self._render_and_get_chain(note)
                     if isinstance(result, list):
                         yield event.chain_result(result)
                     else:
@@ -781,7 +811,7 @@ class BiliVideoPlugin(Star):
         self._log(f"[总结命令] 总结生成完成, 长度={len(note) if note else 0}")
 
         # 发送总结（图片或文本）
-        result = self._render_and_get_chain(note)
+        result = await self._render_and_get_chain(note)
         self._log(f"[总结命令] 输出模式: {'图片' if isinstance(result, list) else '文本'}")
         self._log("═══════ [总结命令] 结束(成功) ═══════")
         if isinstance(result, list):
@@ -830,7 +860,7 @@ class BiliVideoPlugin(Star):
         )
 
         note = await self._generate_note(video_url)
-        result = self._render_and_get_chain(note)
+        result = await self._render_and_get_chain(note)
         if isinstance(result, list):
             yield event.chain_result(result)
         else:
@@ -1016,7 +1046,7 @@ class BiliVideoPlugin(Star):
 
                 video_url = f"https://www.bilibili.com/video/{latest_bvid}"
                 note = await self._generate_note(video_url)
-                result = self._render_and_get_chain(note)
+                result = await self._render_and_get_chain(note)
                 if isinstance(result, list):
                     yield event.chain_result(result)
                 else:
@@ -1305,7 +1335,7 @@ class BiliVideoPlugin(Star):
 
         # 推送消息
         push_header = f"🔔 UP主【{up['name']}】发布了新视频!\n"
-        result = self._render_and_get_chain(note)
+        result = await self._render_and_get_chain(note)
         if isinstance(result, list):
             chain_components = [Plain(push_header)] + result
         else:
