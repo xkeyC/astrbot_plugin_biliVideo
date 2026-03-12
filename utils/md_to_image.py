@@ -453,6 +453,7 @@ async def render_note_image_async(
     output_path: str,
     width: int = 1400,
     is_mobile: bool = False,
+    timeout: int = 60000,
 ) -> Optional[str]:
     try:
         import markdown as md
@@ -495,7 +496,7 @@ async def render_note_image_async(
             scale_factor=2,
             is_mobile=is_mobile,
             full_page=True,
-            timeout=30000,
+            timeout=timeout,
         )
 
         if not screenshot_bytes:
@@ -523,6 +524,7 @@ def render_note_image(
     markdown_text: str,
     output_path: str,
     width: int = 1400,
+    timeout: int = 60000,
 ) -> Optional[str]:
     import asyncio
 
@@ -533,14 +535,14 @@ def render_note_image(
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(
                     asyncio.run,
-                    render_note_image_async(markdown_text, output_path, width, is_mobile=False)
+                    render_note_image_async(markdown_text, output_path, width, is_mobile=False, timeout=timeout)
                 )
                 return future.result()
         else:
             return loop.run_until_complete(
-                render_note_image_async(markdown_text, output_path, width, is_mobile=False)
+                render_note_image_async(markdown_text, output_path, width, is_mobile=False, timeout=timeout)
             )
     except RuntimeError:
         return asyncio.run(
-            render_note_image_async(markdown_text, output_path, width, is_mobile=False)
+            render_note_image_async(markdown_text, output_path, width, is_mobile=False, timeout=timeout)
         )

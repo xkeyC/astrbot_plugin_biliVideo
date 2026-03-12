@@ -1,17 +1,25 @@
 from astrbot.api import logger
-from playwright.async_api import Page, ViewportSize, async_playwright
+from playwright.async_api import Page, ViewportSize, async_playwright, Browser, Playwright
 
 
-async def create_page(
-    headless: bool = True,
-    width: int = 1400,
-    height: int = 10000,
-    scale_factor: int = 2,
-    is_mobile: bool = False,
-) -> Page | None:
+_playwright_instance: Playwright | None = None
+_browser_instance: Browser | None = None
+
+
+async def get_browser() -> Browser | None:
+    """获取或创建复用的浏览器实例"""
+    global _playwright_instance, _browser_instance
+    
+    if _browser_instance and _playwright_instance:
+        try:
+            if _browser_instance.is_connected():
+                return _browser_instance
+        except Exception:
+            pass
+    
     try:
-        playwright = await async_playwright().start()
-
+        _playwright_instance = await async_playwright().start()
+        
         chrome_args = [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -21,12 +29,47 @@ async def create_page(
             "--disable-extensions",
             "--disable-default-apps",
         ]
-
-        browser = await playwright.chromium.launch(
-            headless=headless,
+        
+        _browser_instance = await _playwright_instance.chromium.launch(
+            headless=True,
             args=chrome_args,
         )
+        return _browser_instance
+    except Exception as e:
+        logger.error(f"初始化浏览器失败: {e}")
+        return None
 
+
+async def close_browser():
+    """关闭浏览器实例"""
+    global _playwright_instance, _browser_instance
+    
+    if _browser_instance:
+        try:
+            await _browser_instance.close()
+        except Exception:
+            pass
+        _browser_instance = None
+    
+    if _playwright_instance:
+        try:
+            await _playwright_instance.stop()
+        except Exception:
+            pass
+        _playwright_instance = None
+
+
+async def create_page(
+    width: int = 1400,
+    height: int = 10000,
+    scale_factor: int = 2,
+    is_mobile: bool = False,
+) -> Page | None:
+    browser = await get_browser()
+    if not browser:
+        return None
+    
+    try:
         context = await browser.new_context(
             viewport=ViewportSize(width=width, height=height),
             device_scale_factor=scale_factor,
@@ -34,20 +77,9 @@ async def create_page(
             has_touch=is_mobile,
         )
         page = await context.new_page()
-        __original_close = page.close
-
-        async def close_all(*args: object, **kwargs: object) -> None:
-            page.close = __original_close
-            try:
-                await browser.close()
-                await playwright.stop()
-            except Exception as e:
-                logger.error(f"关闭页面时出错: {e}")
-
-        page.close = close_all
         return page
     except Exception as e:
-        logger.error(f"初始化浏览器失败: {e}")
+        logger.error(f"创建页面失败: {e}")
         return None
 
 
@@ -61,7 +93,6 @@ async def render_html_to_image(
     timeout: int = 30000,
 ) -> bytes | None:
     page = await create_page(
-        headless=True,
         width=width,
         height=10000,
         scale_factor=scale_factor,
@@ -85,4 +116,9 @@ async def render_html_to_image(
         return None
     finally:
         if page:
-            await page.close()
+            try:
+                context = page.context
+                await page.close()
+                await context.close()
+            except Exception:
+                pass

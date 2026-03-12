@@ -9,6 +9,7 @@ import json
 import os
 import re
 import uuid
+from typing import List
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, StarTools
@@ -22,6 +23,7 @@ from .services.note_service import NoteService
 from .utils.url_parser import detect_platform, extract_bilibili_mid
 from .utils.md_to_image import render_note_image_async
 from .utils.env_manager import EnvManager
+from .utils.browser import close_browser
 
 
 class BiliVideoPlugin(Star):
@@ -297,40 +299,68 @@ class BiliVideoPlugin(Star):
         parts = str(message_str).strip().split(maxsplit=1)
         return parts[1].strip() if len(parts) > 1 else ""
 
-    async def _render_and_get_chain(self, note_text: str):
+    async def _render_and_get_chain(self, note_parts: List[str]) -> List:
         """
-        将总结渲染为图片并返回消息链组件，或回退到纯文本。
-
-        :return: list[Image] (图片模式) 或 str (文本模式)
+        将总结渲染为图片或文本，支持分段内容（并发渲染 + 浏览器复用）
+        
+        :param note_parts: 分段的总结文本列表
+        :return: 消息链组件列表（图片或文本）
         """
         if not self.config.get("output_image", True):
             self._log("[Render] output_image=False, 使用纯文本")
-            return note_text
+            result = []
+            for i, part in enumerate(note_parts):
+                if len(note_parts) > 1:
+                    result.append(Plain(f"[{i+1}/{len(note_parts)}]\n{part}"))
+                else:
+                    result.append(Plain(part))
+            return result
 
-        # 初始化 Playwright（首次使用时）
         if not self._playwright_ready:
             self._log("[Render] 首次使用，初始化 Playwright...")
             if not await self._init_playwright():
                 self._log("[Render] Playwright 初始化失败, 回退到纯文本")
-                return note_text
+                result = []
+                for i, part in enumerate(note_parts):
+                    if len(note_parts) > 1:
+                        result.append(Plain(f"[{i+1}/{len(note_parts)}]\n{part}"))
+                    else:
+                        result.append(Plain(part))
+                return result
 
-        # 生成唯一文件名
         import time
-        img_filename = f"note_{int(time.time() * 1000)}.png"
-        img_path = os.path.join(self.data_dir, "images", img_filename)
-
-        # 获取移动端输出设置
+        import asyncio
         is_mobile = bool(self.config.get("mobile_output", False))
-        self._log(f"[Render] 开始渲染图片: {img_path}, mobile={is_mobile}")
-
-        result = await render_note_image_async(note_text, img_path, is_mobile=is_mobile)
-
-        if result and os.path.exists(result):
-            self._log(f"[Render] 图片渲染成功: {os.path.getsize(result)} bytes")
-            return [Image.fromFileSystem(result)]
-        else:
-            self._log("[Render] 图片渲染失败, 回退到纯文本")
-            return note_text
+        render_timeout = self.config.get("render_timeout", 60) * 1000
+        
+        self._log(f"[Render] 开始并发渲染 {len(note_parts)} 段, mobile={is_mobile}, timeout={render_timeout}ms")
+        
+        async def render_single(i: int, note_text: str) -> tuple:
+            img_filename = f"note_{int(time.time() * 1000)}_{i}.png"
+            img_path = os.path.join(self.data_dir, "images", img_filename)
+            self._log(f"[Render] 渲染第 {i+1}/{len(note_parts)} 段: {img_path}")
+            
+            rendered = await render_note_image_async(note_text, img_path, is_mobile=is_mobile, timeout=render_timeout)
+            return i, rendered, note_text, img_path
+        
+        tasks = [render_single(i, note_text) for i, note_text in enumerate(note_parts)]
+        results = await asyncio.gather(*tasks)
+        
+        results.sort(key=lambda x: x[0])
+        
+        final_result = []
+        for i, rendered, note_text, img_path in results:
+            if rendered and os.path.exists(img_path):
+                self._log(f"[Render] 图片渲染成功: {os.path.getsize(img_path)} bytes")
+                final_result.append(Image.fromFileSystem(img_path))
+            else:
+                self._log("[Render] 图片渲染失败, 回退到纯文本")
+                if len(note_parts) > 1:
+                    final_result.append(Plain(f"[{i+1}/{len(note_parts)}]\n{note_text}"))
+                else:
+                    final_result.append(Plain(note_text))
+        
+        return final_result
 
     # ==================== B站链接自动识别 ====================
 
@@ -507,10 +537,7 @@ class BiliVideoPlugin(Star):
                 try:
                     note = await self._generate_note(video_url)
                     result = await self._render_and_get_chain(note)
-                    if isinstance(result, list):
-                        yield event.chain_result(result)
-                    else:
-                        yield event.plain_result(result)
+                    yield event.chain_result(result)
                 except Exception as se:
                     self._log(f"[AutoDetect] 自动总结失败: {se}")
                     yield event.plain_result(f"❌ 自动总结失败: {se}")
@@ -881,16 +908,12 @@ class BiliVideoPlugin(Star):
 
         self._log(f"[总结命令] 调用 _generate_note: {video_url}")
         note = await self._generate_note(video_url)
-        self._log(f"[总结命令] 总结生成完成, 长度={len(note) if note else 0}")
+        self._log(f"[总结命令] 总结生成完成, 共 {len(note)} 段")
 
-        # 发送总结（图片或文本）
         result = await self._render_and_get_chain(note)
-        self._log(f"[总结命令] 输出模式: {'图片' if isinstance(result, list) else '文本'}")
+        self._log(f"[总结命令] 输出组件数: {len(result)}")
         self._log("═══════ [总结命令] 结束(成功) ═══════")
-        if isinstance(result, list):
-            yield event.chain_result(result)
-        else:
-            yield event.plain_result(result)
+        yield event.chain_result(result)
 
     @filter.command("最新视频", alias={"latest"})
     async def latest_video_cmd(self, event: AstrMessageEvent):
@@ -938,10 +961,7 @@ class BiliVideoPlugin(Star):
 
         note = await self._generate_note(video_url)
         result = await self._render_and_get_chain(note)
-        if isinstance(result, list):
-            yield event.chain_result(result)
-        else:
-            yield event.plain_result(result)
+        yield event.chain_result(result)
 
     @filter.command("订阅", alias={"subscribe", "关注UP"})
     async def subscribe_cmd(self, event: AstrMessageEvent):
@@ -1128,10 +1148,7 @@ class BiliVideoPlugin(Star):
                 video_url = f"https://www.bilibili.com/video/{latest_bvid}"
                 note = await self._generate_note(video_url)
                 result = await self._render_and_get_chain(note)
-                if isinstance(result, list):
-                    yield event.chain_result(result)
-                else:
-                    yield event.plain_result(result)
+                yield event.chain_result(result)
 
                 # 更新已推送记录
                 self.subscription_mgr.update_last_video(origin, mid, latest_bvid)
@@ -1250,18 +1267,23 @@ class BiliVideoPlugin(Star):
 
     # ==================== 核心逻辑 ====================
 
-    async def _generate_note(self, video_url: str) -> str:
-        """生成总结的统一调用入口"""
+    async def _generate_note(self, video_url: str) -> List[str]:
+        """生成总结的统一调用入口，返回分段列表"""
         self._log("═══════ [生成总结] 开始 ═══════")
         style = self.config.get("note_style", "detailed")
         enable_link = self.config.get("enable_link", True)
         enable_summary = self.config.get("enable_summary", True)
         quality = self.config.get("download_quality", "fast")
         max_length = self.config.get("max_note_length", 3000)
+        enable_split = self.config.get("enable_split_send", True)
+        split_max_length = self.config.get("split_max_length", 2500)
+        split_by_heading = self.config.get("split_by_heading", True)
+        
         self._log(
             f"[生成总结] 参数: url={video_url}, style={style}, "
             f"enable_link={enable_link}, enable_summary={enable_summary}, "
-            f"quality={quality}, max_length={max_length}"
+            f"quality={quality}, max_length={max_length}, "
+            f"enable_split={enable_split}, split_max_length={split_max_length}"
         )
 
         try:
@@ -1273,15 +1295,18 @@ class BiliVideoPlugin(Star):
                 enable_summary=enable_summary,
                 quality=quality,
                 max_length=max_length,
+                enable_split=enable_split,
+                split_max_length=split_max_length,
+                split_by_heading=split_by_heading,
             )
-            self._log(f"[生成总结] 完成, 结果长度={len(result) if result else 0}")
+            self._log(f"[生成总结] 完成, 共 {len(result)} 段")
             self._log("═══════ [生成总结] 结束 ═══════")
             return result
         except Exception as e:
             self._log(f"[生成总结] 异常: {e}")
             self._log("═══════ [生成总结] 结束(异常) ═══════")
             logger.error(f"总结生成异常: {e}", exc_info=True)
-            return f"❌ 总结生成失败: {str(e)}"
+            return [f"❌ 总结生成失败: {str(e)}"]
 
     async def _ask_llm(self, prompt: str) -> str:
         """根据配置调用 LLM（AstrBot 内置 或 OpenAI 兼容 API）"""
@@ -1417,10 +1442,7 @@ class BiliVideoPlugin(Star):
         # 推送消息
         push_header = f"🔔 UP主【{up['name']}】发布了新视频!\n"
         result = await self._render_and_get_chain(note)
-        if isinstance(result, list):
-            chain_components = [Plain(push_header)] + result
-        else:
-            chain_components = [Plain(push_header + "━━━━━━━━━━━━━━━━━━━\n\n" + result)]
+        chain_components = [Plain(push_header)] + result
 
         # 获取推送目标：优先使用配置的推送目标，否则推到订阅来源
         push_origins = self.subscription_mgr.get_push_origins()
@@ -1441,7 +1463,7 @@ class BiliVideoPlugin(Star):
     # ==================== 生命周期 ====================
 
     async def terminate(self):
-        """插件卸载时停止定时任务"""
+        """插件卸载时停止定时任务并清理资源"""
         self._running = False
         if self._check_task and not self._check_task.done():
             self._check_task.cancel()
@@ -1449,5 +1471,7 @@ class BiliVideoPlugin(Star):
                 await self._check_task
             except asyncio.CancelledError:
                 pass
+
+        await close_browser()
 
         logger.info("BiliVideo 视频总结插件已卸载")

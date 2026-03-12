@@ -183,6 +183,34 @@
     "max": 10000,
     "hint": "总结最大字符数，超过将自动截断（防止消息过长发送失败）"
   },
+  "enable_split_send": {
+    "description": "启用分段发送",
+    "type": "bool",
+    "default": true,
+    "hint": "当总结内容过长时，自动分段发送。关闭则直接截断"
+  },
+  "split_max_length": {
+    "description": "分段发送 - 每段最大字符数",
+    "type": "int",
+    "default": 2500,
+    "min": 500,
+    "max": 4000,
+    "hint": "分段发送时，每段内容的最大字符数。建议 2000-3000，过大可能发送失败"
+  },
+  "split_by_heading": {
+    "description": "分段发送 - 按标题分段",
+    "type": "bool",
+    "default": true,
+    "hint": "优先按 ## 标题分段，使每段内容更完整。关闭则按字符数硬切"
+  },
+  "render_timeout": {
+    "description": "单张图片渲染超时时间 (秒)",
+    "type": "int",
+    "default": 60,
+    "min": 10,
+    "max": 300,
+    "hint": "单张图片渲染的最大等待时间，超时将回退到纯文本发送。长视频总结建议设为 60-120 秒"
+  },
   "enable_auto_push": {
     "description": "启用自动推送",
     "type": "bool",
