@@ -55,12 +55,19 @@ class BiliVideoPlugin(Star):
         self.bili_cookies = self.bili_login.get_cookies()
         self._log(f"Cookie 状态: {'已加载, keys=' + str(list(self.bili_cookies.keys())) if self.bili_cookies else '无'}")
 
-        # 解析群聊访问控制
+        # 解析群聊访问控制 - 总结功能
         self.access_mode = self.config.get("access_mode", "blacklist")
         self.group_list = self._parse_list(
             str(self.config.get("group_list", ""))
         )
-        self._log(f"访问控制: mode={self.access_mode}, group_list={self.group_list}")
+        self._log(f"总结功能访问控制: mode={self.access_mode}, group_list={self.group_list}")
+
+        # 解析群聊访问控制 - B站链接识别
+        self.detect_access_mode = self.config.get("detect_access_mode", "blacklist")
+        self.detect_group_list = self._parse_list(
+            str(self.config.get("detect_group_list", ""))
+        )
+        self._log(f"B站链接识别访问控制: mode={self.detect_access_mode}, group_list={self.detect_group_list}")
 
         # 初始化服务
         self.subscription_mgr = SubscriptionManager(self.data_dir)
@@ -153,33 +160,68 @@ class BiliVideoPlugin(Star):
         return {item.strip() for item in text.split(',') if item.strip()}
 
     def _check_access(self, event: AstrMessageEvent) -> bool:
-        """检查群是否有权使用插件（仅群维度，不看个人）"""
+        """检查群是否有权使用总结功能（仅群维度，不看个人）"""
         try:
             origin = getattr(event, 'unified_msg_origin', '') or ''
-            self._log(f"[AccessCheck] mode={self.access_mode}, origin={origin}, group_list={self.group_list}")
+            self._log(f"[AccessCheck/总结] mode={self.access_mode}, origin={origin}, group_list={self.group_list}")
 
             if self.access_mode == 'all':
-                self._log("[AccessCheck] 模式=all, 放行")
+                self._log("[AccessCheck/总结] 模式=all, 放行")
                 return True
 
             if not self.group_list:
-                self._log("[AccessCheck] group_list 为空, 放行")
+                self._log("[AccessCheck/总结] group_list 为空, 放行")
                 return True
 
             if self.access_mode == 'whitelist':
                 for gid in self.group_list:
                     if f':{gid}' in origin or origin.endswith(gid):
-                        self._log(f"[AccessCheck] 白名单命中: {gid}")
+                        self._log(f"[AccessCheck/总结] 白名单命中: {gid}")
                         return True
-                self._log("[AccessCheck] 白名单未命中, 拒绝")
+                self._log("[AccessCheck/总结] 白名单未命中, 拒绝")
                 return False
 
             elif self.access_mode == 'blacklist':
                 for gid in self.group_list:
                     if f':{gid}' in origin or origin.endswith(gid):
-                        self._log(f"[AccessCheck] 黑名单命中: {gid}, 拒绝")
+                        self._log(f"[AccessCheck/总结] 黑名单命中: {gid}, 拒绝")
                         return False
-                self._log("[AccessCheck] 黑名单未命中, 放行")
+                self._log("[AccessCheck/总结] 黑名单未命中, 放行")
+                return True
+
+        except Exception as e:
+            logger.warning(f"访问控制检查异常: {e}")
+
+        return True
+
+    def _check_detect_access(self, event: AstrMessageEvent) -> bool:
+        """检查群是否有权使用B站链接识别功能（仅群维度，不看个人）"""
+        try:
+            origin = getattr(event, 'unified_msg_origin', '') or ''
+            self._log(f"[AccessCheck/识别] mode={self.detect_access_mode}, origin={origin}, group_list={self.detect_group_list}")
+
+            if self.detect_access_mode == 'all':
+                self._log("[AccessCheck/识别] 模式=all, 放行")
+                return True
+
+            if not self.detect_group_list:
+                self._log("[AccessCheck/识别] group_list 为空, 放行")
+                return True
+
+            if self.detect_access_mode == 'whitelist':
+                for gid in self.detect_group_list:
+                    if f':{gid}' in origin or origin.endswith(gid):
+                        self._log(f"[AccessCheck/识别] 白名单命中: {gid}")
+                        return True
+                self._log("[AccessCheck/识别] 白名单未命中, 拒绝")
+                return False
+
+            elif self.detect_access_mode == 'blacklist':
+                for gid in self.detect_group_list:
+                    if f':{gid}' in origin or origin.endswith(gid):
+                        self._log(f"[AccessCheck/识别] 黑名单命中: {gid}, 拒绝")
+                        return False
+                self._log("[AccessCheck/识别] 黑名单未命中, 放行")
                 return True
 
         except Exception as e:
@@ -257,8 +299,8 @@ class BiliVideoPlugin(Star):
         if raw_msg.strip().startswith("/"):
             return
 
-        # 访问控制
-        if not self._check_access(event):
+        # 访问控制（B站链接识别独立配置）
+        if not self._check_detect_access(event):
             return
 
         bili_url = ""
