@@ -208,5 +208,17 @@
     "type": "string",
     "default": "",
     "hint": "新视频总结推送到哪些QQ号（私聊），用英文逗号分隔。也可通过 /添加推送号 命令添加"
+  },
+  "video_info_template": {
+    "description": "视频信息消息模板",
+    "type": "string",
+    "default": "📺 {title}\n👤 UP主: {uploader}\n📝 简介: {desc}\n📅 发布: {pubdate}\n▶️ {view}播放  💬 {danmaku}弹幕  👍 {like}点赞\n🔗 {url}",
+    "hint": "B站链接识别时推送的视频信息模板。可用变量: {title}, {uploader}, {desc}, {pubdate}, {view}, {danmaku}, {like}, {url}, {cover}"
+  },
+  "summary_progress_template": {
+    "description": "正在总结提示语模板",
+    "type": "string",
+    "default": "⏳ 正在生成总结，请稍候（可能需要1-3分钟）...",
+    "hint": "开始生成视频总结时显示的提示语"
   }
 }

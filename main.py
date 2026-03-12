@@ -159,6 +159,66 @@ class BiliVideoPlugin(Star):
             return set()
         return {item.strip() for item in text.split(',') if item.strip()}
 
+    def _format_video_info(self, info: dict, bvid: str) -> str:
+        """使用模板格式化视频信息，支持 detect_show_* 配置项的向后兼容"""
+        template = self.config.get("video_info_template", "")
+        
+        def fmt_num(n):
+            if n >= 10000:
+                return f"{n / 10000:.1f}万"
+            return str(n)
+        
+        import time as _time
+        pubdate = ""
+        if info.get('pubdate'):
+            try:
+                pubdate = _time.strftime('%Y-%m-%d %H:%M', _time.localtime(info['pubdate']))
+            except Exception:
+                pass
+        
+        desc = info.get('desc', '')
+        if len(desc) > 100:
+            desc = desc[:100] + "..."
+        
+        video_url = f"https://www.bilibili.com/video/{bvid}"
+        
+        if template:
+            return template.format(
+                title=info.get('title', ''),
+                uploader=info.get('owner_name', ''),
+                desc=desc,
+                pubdate=pubdate,
+                view=fmt_num(info.get('view', 0)),
+                danmaku=fmt_num(info.get('danmaku', 0)),
+                like=fmt_num(info.get('like', 0)),
+                url=video_url,
+                cover=info.get('pic', '')
+            )
+        
+        lines = []
+        lines.append(f"📺 {info['title']}")
+        
+        if self.config.get("detect_show_uploader", True):
+            lines.append(f"👤 UP主: {info['owner_name']}")
+        
+        if self.config.get("detect_show_desc", True) and info.get('desc'):
+            lines.append(f"📝 简介: {desc}")
+        
+        if self.config.get("detect_show_pubtime", True) and pubdate:
+            lines.append(f"📅 发布: {pubdate}")
+        
+        if self.config.get("detect_show_stats", True):
+            lines.append(
+                f"▶️ {fmt_num(info['view'])}播放  "
+                f"💬 {fmt_num(info['danmaku'])}弹幕  "
+                f"👍 {fmt_num(info['like'])}点赞"
+            )
+        
+        if self.config.get("detect_show_link", True):
+            lines.append(f"🔗 {video_url}")
+        
+        return "\n".join(lines)
+
     def _check_access(self, event: AstrMessageEvent) -> bool:
         """检查群是否有权使用总结功能（仅群维度，不看个人）"""
         try:
@@ -415,51 +475,14 @@ class BiliVideoPlugin(Star):
 
         self._log(f"[AutoDetect] 检测到 BV 号: {bvid}")
 
-        # 获取视频信息并推送
         try:
             info = await get_video_info(bvid, cookies=self.bili_cookies)
             if not info:
                 self._log(f"[AutoDetect] 获取视频信息失败: {bvid}")
                 return
 
-            def fmt_num(n):
-                if n >= 10000:
-                    return f"{n / 10000:.1f}万"
-                return str(n)
-
-            # 按配置构造文本（每次从 config 动态读取）
+            text = self._format_video_info(info, bvid)
             video_url = f"https://www.bilibili.com/video/{bvid}"
-            lines = []
-            lines.append(f"📺 {info['title']}")
-
-            if self.config.get("detect_show_uploader", True):
-                lines.append(f"👤 UP主: {info['owner_name']}")
-
-            if self.config.get("detect_show_desc", True) and info.get('desc'):
-                desc = info['desc']
-                if len(desc) > 100:
-                    desc = desc[:100] + "..."
-                lines.append(f"📝 简介: {desc}")
-
-            if self.config.get("detect_show_pubtime", True) and info.get('pubdate'):
-                import time as _time
-                try:
-                    pub_str = _time.strftime('%Y-%m-%d %H:%M', _time.localtime(info['pubdate']))
-                    lines.append(f"📅 发布: {pub_str}")
-                except Exception:
-                    pass
-
-            if self.config.get("detect_show_stats", True):
-                lines.append(
-                    f"▶️ {fmt_num(info['view'])}播放  "
-                    f"💬 {fmt_num(info['danmaku'])}弹幕  "
-                    f"👍 {fmt_num(info['like'])}点赞"
-                )
-
-            if self.config.get("detect_show_link", True):
-                lines.append(f"🔗 {video_url}")
-
-            text = "\n".join(lines)
 
             # 构建消息链
             chain = []
@@ -476,7 +499,11 @@ class BiliVideoPlugin(Star):
             # 自动总结
             if self.config.get("detect_auto_summary", False):
                 self._log(f"[AutoDetect] 开始自动总结: {video_url}")
-                yield event.plain_result("⏳ 正在生成视频总结...")
+                progress_msg = self.config.get(
+                    "summary_progress_template",
+                    "⏳ 正在生成总结，请稍候（可能需要1-3分钟）..."
+                )
+                yield event.plain_result(progress_msg)
                 try:
                     note = await self._generate_note(video_url)
                     result = await self._render_and_get_chain(note)
@@ -846,7 +873,11 @@ class BiliVideoPlugin(Star):
             yield event.plain_result("❌ 目前仅支持B站视频链接")
             return
 
-        yield event.plain_result("⏳ 正在生成总结，请稍候（可能需要1-3分钟）...")
+        progress_msg = self.config.get(
+            "summary_progress_template",
+            "⏳ 正在生成总结，请稍候（可能需要1-3分钟）..."
+        )
+        yield event.plain_result(progress_msg)
 
         self._log(f"[总结命令] 调用 _generate_note: {video_url}")
         note = await self._generate_note(video_url)
@@ -897,8 +928,12 @@ class BiliVideoPlugin(Star):
         video = videos[0]
         video_url = f"https://www.bilibili.com/video/{video['bvid']}"
 
+        progress_msg = self.config.get(
+            "summary_progress_template",
+            "⏳ 正在生成总结，请稍候（可能需要1-3分钟）..."
+        )
         yield event.plain_result(
-            f"📺 找到最新视频: {video['title']}\n⏳ 正在生成总结..."
+            f"📺 找到最新视频: {video['title']}\n{progress_msg}"
         )
 
         note = await self._generate_note(video_url)
@@ -1080,10 +1115,14 @@ class BiliVideoPlugin(Star):
 
                 # 有新视频！
                 found_new += 1
+                progress_msg = self.config.get(
+                    "summary_progress_template",
+                    "⏳ 正在生成总结，请稍候（可能需要1-3分钟）..."
+                )
                 yield event.plain_result(
                     f"🔔 UP主【{up['name']}】有新视频!\n"
                     f"📺 {latest['title']}\n"
-                    f"⏳ 正在生成总结..."
+                    f"{progress_msg}"
                 )
 
                 video_url = f"https://www.bilibili.com/video/{latest_bvid}"

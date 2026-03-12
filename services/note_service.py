@@ -49,29 +49,37 @@ class NoteService:
         :param max_length: 总结最大字符数
         :return: Markdown 总结文本
         """
+        audio_meta = None
         try:
-            # 1. 下载音频
-            logger.info(f"开始下载音频: {video_url}")
-            audio_meta = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: self.downloader.download(video_url, quality=quality)
-            )
-            logger.info(f"音频下载完成: {audio_meta.title}")
-
-            # 2. 获取字幕（优先平台字幕）
+            # 1. 优先尝试获取平台字幕（无需下载音频）
             logger.info("尝试获取平台字幕...")
             transcript = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.downloader.download_subtitles(video_url)
             )
 
-            # 3. 如果没有字幕，使用 bcut 转写
+            # 2. 如果没有平台字幕，才下载音频并使用 bcut 转写
             if not transcript or not transcript.segments:
-                logger.info("无平台字幕，使用必剪转写...")
+                logger.info("无平台字幕，开始下载音频并转写...")
+                audio_meta = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: self.downloader.download(video_url, quality=quality)
+                )
+                logger.info(f"音频下载完成: {audio_meta.title}")
+                
+                logger.info("使用必剪转写...")
                 transcript = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: self.transcriber.transcript(audio_meta.file_path)
                 )
+            else:
+                logger.info("使用平台字幕，跳过音频下载")
+                # 需要下载音频以获取视频元信息
+                audio_meta = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: self.downloader.download(video_url, quality=quality)
+                )
+                logger.info(f"获取视频信息: {audio_meta.title}")
 
             if not transcript or not transcript.segments:
                 return "❌ 无法获取视频内容（字幕和转写均失败）"
