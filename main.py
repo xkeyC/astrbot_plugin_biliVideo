@@ -13,7 +13,7 @@ from typing import List
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, StarTools
-from astrbot.api.message_components import Plain, Image
+from astrbot.api.message_components import Plain, Image, Reply
 from astrbot.api import logger
 
 from .services.subscription import SubscriptionManager
@@ -29,18 +29,17 @@ from .utils.browser import close_browser
 class BiliVideoPlugin(Star):
     """BiliVideo 视频总结插件"""
 
+    _summary_cache: dict[str, dict] = {}
+
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
 
-        # 数据目录（使用框架规范 API）
         self.data_dir = str(StarTools.get_data_dir("astrbot_plugin_bilivideo"))
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(os.path.join(self.data_dir, "images"), exist_ok=True)
 
-        # 读取配置（由 AstrBot 直接传入）
         self.config = config
 
-        # Debug 模式 —— 在其他所有初始化之前设置
         self._debug_mode = bool(self.config.get("debug_mode", False))
         if self._debug_mode:
             logger.info("═══════════ [BiliVideo] Debug 模式已启用 ═══════════")
@@ -118,6 +117,10 @@ class BiliVideoPlugin(Star):
         """Debug 日志输出 —— 使用 logger.info 确保始终可见"""
         if self._debug_mode:
             logger.info(f"[BiliVideo/DBG] {msg}")
+
+    def _log_always(self, msg: str):
+        """始终输出的日志"""
+        logger.info(f"[BiliVideo] {msg}")
 
     async def _init_playwright(self):
         """初始化 Playwright 环境"""
@@ -299,16 +302,21 @@ class BiliVideoPlugin(Star):
         parts = str(message_str).strip().split(maxsplit=1)
         return parts[1].strip() if len(parts) > 1 else ""
 
-    async def _render_and_get_chain(self, note_parts: List[str]) -> List:
+    async def _render_and_get_chain(self, note_parts: List[str], bvid: str = "") -> List:
         """
         将总结渲染为图片或文本，支持分段内容（并发渲染 + 浏览器复用）
         
         :param note_parts: 分段的总结文本列表
+        :param bvid: BV号，用于标记消息
         :return: 消息链组件列表（图片或文本）
         """
+        result = []
+        
+        if bvid:
+            result.append(Plain(f"📺 {bvid} 的总结如下："))
+        
         if not self.config.get("output_image", True):
             self._log("[Render] output_image=False, 使用纯文本")
-            result = []
             for i, part in enumerate(note_parts):
                 if len(note_parts) > 1:
                     result.append(Plain(f"[{i+1}/{len(note_parts)}]\n{part}"))
@@ -320,7 +328,6 @@ class BiliVideoPlugin(Star):
             self._log("[Render] 首次使用，初始化 Playwright...")
             if not await self._init_playwright():
                 self._log("[Render] Playwright 初始化失败, 回退到纯文本")
-                result = []
                 for i, part in enumerate(note_parts):
                     if len(note_parts) > 1:
                         result.append(Plain(f"[{i+1}/{len(note_parts)}]\n{part}"))
@@ -348,19 +355,18 @@ class BiliVideoPlugin(Star):
         
         results.sort(key=lambda x: x[0])
         
-        final_result = []
         for i, rendered, note_text, img_path in results:
             if rendered and os.path.exists(img_path):
                 self._log(f"[Render] 图片渲染成功: {os.path.getsize(img_path)} bytes")
-                final_result.append(Image.fromFileSystem(img_path))
+                result.append(Image.fromFileSystem(img_path))
             else:
                 self._log("[Render] 图片渲染失败, 回退到纯文本")
                 if len(note_parts) > 1:
-                    final_result.append(Plain(f"[{i+1}/{len(note_parts)}]\n{note_text}"))
+                    result.append(Plain(f"[{i+1}/{len(note_parts)}]\n{note_text}"))
                 else:
-                    final_result.append(Plain(note_text))
+                    result.append(Plain(note_text))
         
-        return final_result
+        return result
 
     # ==================== B站链接自动识别 ====================
 
@@ -501,47 +507,56 @@ class BiliVideoPlugin(Star):
                             bvid = bv_match.group(1)
 
         if not bvid:
-            return  # 没有检测到B站链接，静默放过
+            return
 
-        self._log(f"[AutoDetect] 检测到 BV 号: {bvid}")
-
+        self._log_always(f"[AutoDetect] 检测到 BV 号: {bvid}")
+        
         try:
-            info = await get_video_info(bvid, cookies=self.bili_cookies)
-            if not info:
-                self._log(f"[AutoDetect] 获取视频信息失败: {bvid}")
+            history = await self._find_bvid_history(event, bvid)
+            self._log_always(f"[AutoDetect] 历史查询结果: {history}")
+            
+            video_url = f"https://www.bilibili.com/video/{bvid}"
+            
+            need_push_info = not history["video_info"] and not history["summary"]
+            need_summary = not history["summary"] and self.config.get("detect_auto_summary", False)
+            
+            if history["summary"]:
+                self._log_always(f"[AutoDetect] 已有总结，跳过")
+                return
+            
+            if history["video_info"] and not need_summary:
+                self._log_always(f"[AutoDetect] 已有视频信息，跳过")
                 return
 
-            text = self._format_video_info(info, bvid)
-            video_url = f"https://www.bilibili.com/video/{bvid}"
+            if need_push_info:
+                try:
+                    info = await get_video_info(bvid, cookies=self.bili_cookies)
+                    if not info:
+                        return
+                    
+                    chain = []
+                    if self.config.get("detect_show_cover", True):
+                        pic_url = info.get("pic", "")
+                        if pic_url:
+                            if pic_url.startswith("//"):
+                                pic_url = "https:" + pic_url
+                            chain.append(Image.fromURL(pic_url))
+                    chain.append(Plain(self._format_video_info(info, bvid)))
+                    yield event.chain_result(chain)
+                except Exception as e:
+                    self._log(f"[AutoDetect] 推送视频信息失败: {e}")
 
-            # 构建消息链
-            chain = []
-            if self.config.get("detect_show_cover", True):
-                pic_url = info.get("pic", "")
-                if pic_url:
-                    if pic_url.startswith("//"):
-                        pic_url = "https:" + pic_url
-                    chain.append(Image.fromURL(pic_url))
-            chain.append(Plain(text))
-
-            yield event.chain_result(chain)
-
-            # 自动总结
-            if self.config.get("detect_auto_summary", False):
-                self._log(f"[AutoDetect] 开始自动总结: {video_url}")
-                progress_msg = self.config.get(
-                    "summary_progress_template",
-                    "⏳ 正在生成总结，请稍候（可能需要1-3分钟）..."
-                )
+            if need_summary:
+                self._log_always(f"[AutoDetect] 生成总结: {video_url}")
+                progress_msg = self.config.get("summary_progress_template", "⏳ 正在生成总结，请稍候（可能需要1-3分钟）...")
                 yield event.plain_result(progress_msg)
                 try:
                     note = await self._generate_note(video_url)
-                    result = await self._render_and_get_chain(note)
+                    result = await self._render_and_get_chain(note, bvid=bvid)
                     yield event.chain_result(result)
                 except Exception as se:
                     self._log(f"[AutoDetect] 自动总结失败: {se}")
                     yield event.plain_result(f"❌ 自动总结失败: {se}")
-
         except Exception as e:
             self._log(f"[AutoDetect] 处理异常: {e}")
             logger.error(f"B站链接自动识别处理异常: {e}", exc_info=True)
@@ -796,14 +811,11 @@ class BiliVideoPlugin(Star):
             yield event.plain_result("⛔ 你没有权限使用此插件")
             return
 
-        # 从消息中提取 URL
-        import re
         raw_msg = event.message_str or ""
         self._log(f"[总结命令] event.message_str = '{raw_msg}'")
         self._log(f"[总结命令] event.message_str type = {type(raw_msg)}")
         self._log(f"[总结命令] event.message_str repr = {repr(raw_msg)}")
 
-        # 也尝试从 message_obj 中获取完整消息
         full_text = raw_msg
         try:
             if hasattr(event, 'message_obj') and event.message_obj:
@@ -811,7 +823,6 @@ class BiliVideoPlugin(Star):
                 self._log(f"[总结命令] message_obj.message 链长度 = {len(chain) if chain else 0}")
                 for i, comp in enumerate(chain or []):
                     self._log(f"[总结命令] 消息组件[{i}]: type={type(comp).__name__}, str={str(comp)[:200]}")
-                # 拼接所有 Plain 文本
                 plain_texts = []
                 for comp in (chain or []):
                     if hasattr(comp, 'text'):
@@ -827,19 +838,23 @@ class BiliVideoPlugin(Star):
         logger.info(f"总结命令收到消息: {raw_msg}")
 
         video_url = ""
+        bvid = None
 
-        # 方式1: 从命令参数中取
+        reply_bvid = self._extract_bvid_from_reply(event)
+        if reply_bvid:
+            video_url = f"https://www.bilibili.com/video/{reply_bvid}"
+            bvid = reply_bvid
+            self._log(f"[总结命令] 从引用消息中提取到 BV={bvid}")
+
         args = self._parse_args(raw_msg)
         self._log(f"[总结命令] 方式1 _parse_args 结果: '{args}'")
-        if args:
-            # 尝试直接取第一个参数作为URL
+        if not video_url and args:
             first_arg = args.split()[0]
             self._log(f"[总结命令] 方式1 第一个参数: '{first_arg}'")
             if 'bilibili.com' in first_arg or 'b23.tv' in first_arg:
                 video_url = first_arg
                 self._log(f"[总结命令] 方式1 命中URL: '{video_url}'")
 
-        # 方式2: 用正则从 raw_msg 中找 bilibili URL
         if not video_url:
             url_match = re.search(
                 r'https?://(?:www\.)?bilibili\.com/video/[A-Za-z0-9/?=&_.]+',
@@ -851,7 +866,6 @@ class BiliVideoPlugin(Star):
             else:
                 self._log("[总结命令] 方式2 raw_msg中未匹配到bilibili URL")
 
-        # 方式3: 从 full_text (message_obj) 中找
         if not video_url and full_text != raw_msg:
             url_match = re.search(
                 r'https?://(?:www\.)?bilibili\.com/video/[A-Za-z0-9/?=&_.]+',
@@ -863,7 +877,6 @@ class BiliVideoPlugin(Star):
             else:
                 self._log("[总结命令] 方式3 full_text中未匹配到bilibili URL")
 
-        # 方式4: 找 b23.tv 短链
         if not video_url:
             for text_src in [raw_msg, full_text]:
                 short_match = re.search(r'https?://b23\.tv/\S+', text_src)
@@ -874,7 +887,6 @@ class BiliVideoPlugin(Star):
             if not video_url:
                 self._log("[总结命令] 方式4 未匹配到 b23.tv 短链")
 
-        # 方式5: 尝试从整条消息中找 BV 号
         if not video_url:
             bv_match = re.search(r'(BV[0-9A-Za-z]{10})', raw_msg + " " + full_text)
             if bv_match:
@@ -884,12 +896,8 @@ class BiliVideoPlugin(Star):
                 self._log("[总结命令] 方式5 未找到BV号")
 
         if not video_url:
-            self._log("[总结命令] 所有方式均未提取到URL, 返回错误")
+            self._log("[总结命令] 所有方式均未提取到URL")
             self._log("═══════ [总结命令] 结束(无URL) ═══════")
-            yield event.plain_result(
-                "❌ 请提供视频链接\n用法: /总结 <B站视频链接>\n"
-                "示例: /总结 https://www.bilibili.com/video/BV1xx..."
-            )
             return
 
         video_url = video_url.rstrip('>')
@@ -899,6 +907,23 @@ class BiliVideoPlugin(Star):
             self._log("═══════ [总结命令] 结束(非B站) ═══════")
             yield event.plain_result("❌ 目前仅支持B站视频链接")
             return
+
+        bv_match = re.search(r'(BV[0-9A-Za-z]{10})', video_url)
+        if bv_match:
+            bvid = bv_match.group(1)
+
+        self._log_always(f"[总结命令] 提取到 bvid={bvid}")
+
+        if bvid:
+            history = await self._find_bvid_history(event, bvid)
+            if history["summary"]:
+                self._log_always(f"[总结命令] 已有总结: {history['summary']}")
+                yield event.chain_result([
+                    Reply(id=history["summary"]),
+                    Plain("✅ 该视频已完成总结")
+                ])
+                self._log_always("═══════ [总结命令] 结束(引用旧总结) ═══════")
+                return
 
         progress_msg = self.config.get(
             "summary_progress_template",
@@ -910,10 +935,157 @@ class BiliVideoPlugin(Star):
         note = await self._generate_note(video_url)
         self._log(f"[总结命令] 总结生成完成, 共 {len(note)} 段")
 
-        result = await self._render_and_get_chain(note)
+        result = await self._render_and_get_chain(note, bvid=bvid or "")
         self._log(f"[总结命令] 输出组件数: {len(result)}")
-        self._log("═══════ [总结命令] 结束(成功) ═══════")
+        self._log_always("═══════ [总结命令] 结束(成功) ═══════")
         yield event.chain_result(result)
+
+    def _extract_bvid_from_reply(self, event: AstrMessageEvent) -> str | None:
+        """从引用消息中提取 BV 号"""
+        try:
+            messages = event.get_messages()
+            self._log_always(f"[ReplyExtract] 消息链长度: {len(messages)}")
+            for comp in messages:
+                if isinstance(comp, Reply):
+                    reply_text = comp.message_str or ""
+                    self._log_always(f"[ReplyExtract] 引用消息文本: {reply_text[:100]}...")
+                    bv_match = re.search(r'(BV[0-9A-Za-z]{10})', reply_text)
+                    if bv_match:
+                        self._log_always(f"[ReplyExtract] 从引用消息文本中找到 BV={bv_match.group(1)}")
+                        return bv_match.group(1)
+                    
+                    if comp.chain:
+                        self._log_always(f"[ReplyExtract] 引用消息 chain 长度: {len(comp.chain)}")
+                        for item in comp.chain:
+                            if hasattr(item, 'text'):
+                                bv_match = re.search(r'(BV[0-9A-Za-z]{10})', item.text)
+                                if bv_match:
+                                    self._log_always(f"[ReplyExtract] 从引用消息 chain 中找到 BV={bv_match.group(1)}")
+                                    return bv_match.group(1)
+                            elif isinstance(item, str):
+                                bv_match = re.search(r'(BV[0-9A-Za-z]{10})', item)
+                                if bv_match:
+                                    return bv_match.group(1)
+                    
+                    self._log_always(f"[ReplyExtract] 引用消息中未找到 BV 号")
+                    return None
+        except Exception as e:
+            self._log_always(f"[ReplyExtract] 解析引用消息异常: {e}")
+        return None
+
+    async def _find_bvid_history(self, event: AstrMessageEvent, bvid: str) -> dict:
+        """
+        查询 bot 最近 50 条消息中与目标 BV 相关的内容
+        
+        Returns:
+            {"summary": msg_id or None, "video_info": msg_id or None}
+        """
+        result = {"summary": None, "video_info": None}
+        
+        try:
+            bot_self_id = None
+            try:
+                bot_self_id = event.get_self_id()
+            except Exception:
+                pass
+            
+            bot = getattr(event, 'bot', None)
+            group_id = event.get_group_id()
+            is_group = bool(group_id)
+            
+            self._log_always(f"[HistoryCheck] BV={bvid}, bot_self_id={bot_self_id}, is_group={is_group}")
+            
+            if bot and is_group and group_id:
+                try:
+                    all_messages = []
+                    message_seq = 0
+                    
+                    for _ in range(3):
+                        resp = await bot.api.call_action("get_group_msg_history", group_id=group_id, count=50, message_seq=message_seq)
+                        round_messages = resp.get("messages", [])
+                        if not round_messages:
+                            break
+                        all_messages.extend(round_messages)
+                        if len(all_messages) >= 50:
+                            break
+                        message_seq = round_messages[-1].get("message_seq", 0)
+                    
+                    self._log_always(f"[HistoryCheck] NapCat 获取 {len(all_messages)} 条消息")
+                    
+                    for msg in all_messages:
+                        sender_id = str(msg.get("sender", {}).get("user_id", ""))
+                        if sender_id != str(bot_self_id) and sender_id != "bot":
+                            continue
+                        
+                        content = msg.get("raw_message", "") or ""
+                        msg_data = msg.get("message", [])
+                        if isinstance(msg_data, list):
+                            for item in msg_data:
+                                if isinstance(item, dict):
+                                    content += " " + (item.get("text", "") or item.get("data", {}).get("text", ""))
+                        
+                        if bvid not in content:
+                            continue
+                        
+                        msg_id = str(msg.get("message_id", "") or msg.get("seq", ""))
+                        
+                        if (f"📺 {bvid} 的总结如下" in content or "总结如下" in content) and not result["summary"]:
+                            self._log_always(f"[HistoryCheck] 找到总结: {msg_id}")
+                            result["summary"] = msg_id
+                        elif f"bilibili.com/video/{bvid}" in content and not result["video_info"]:
+                            self._log_always(f"[HistoryCheck] 找到视频信息: {msg_id}")
+                            result["video_info"] = msg_id
+                    
+                    return result
+                    
+                except Exception as e:
+                    self._log_always(f"[HistoryCheck] NapCat 失败: {e}，回退 PlatformMessageHistory")
+
+            history_mgr = self.context.message_history_manager
+            if not history_mgr:
+                return result
+            
+            umo = event.unified_msg_origin
+            parts = umo.split(':')
+            if len(parts) < 3:
+                return result
+            
+            history = await history_mgr.get(parts[0], parts[2], page=1, page_size=50)
+            self._log_always(f"[HistoryCheck] PlatformMessageHistory 获取 {len(history)} 条")
+            
+            for record in reversed(history):
+                content = record.content
+                if not isinstance(content, dict):
+                    continue
+                
+                sender_id = record.sender_id
+                if sender_id != "bot" and str(sender_id) != str(bot_self_id):
+                    continue
+                
+                chain = content.get('chain', []) or content.get('message', [])
+                msg_str = content.get('message_str', '')
+                full_content = msg_str + " " + " ".join(
+                    item.get('text', '') if isinstance(item, dict) else str(item)
+                    for item in chain
+                )
+                
+                if bvid not in full_content:
+                    continue
+                
+                msg_id = str(record.id)
+                
+                if (f"📺 {bvid} 的总结如下" in full_content or "总结如下" in full_content) and not result["summary"]:
+                    self._log_always(f"[HistoryCheck] 找到总结: {msg_id}")
+                    result["summary"] = msg_id
+                elif f"bilibili.com/video/{bvid}" in full_content and not result["video_info"]:
+                    self._log_always(f"[HistoryCheck] 找到视频信息: {msg_id}")
+                    result["video_info"] = msg_id
+            
+            return result
+            
+        except Exception as e:
+            self._log_always(f"[HistoryCheck] 异常: {e}")
+            return result
 
     @filter.command("最新视频", alias={"latest"})
     async def latest_video_cmd(self, event: AstrMessageEvent):
@@ -950,6 +1122,15 @@ class BiliVideoPlugin(Star):
 
         video = videos[0]
         video_url = f"https://www.bilibili.com/video/{video['bvid']}"
+        bvid = video['bvid']
+
+        history = await self._find_bvid_history(event, bvid)
+        if history["summary"]:
+            yield event.chain_result([
+                Reply(id=history["summary"]),
+                Plain("✅ 该视频已完成总结")
+            ])
+            return
 
         progress_msg = self.config.get(
             "summary_progress_template",
@@ -960,7 +1141,7 @@ class BiliVideoPlugin(Star):
         )
 
         note = await self._generate_note(video_url)
-        result = await self._render_and_get_chain(note)
+        result = await self._render_and_get_chain(note, bvid=bvid)
         yield event.chain_result(result)
 
     @filter.command("订阅", alias={"subscribe", "关注UP"})
