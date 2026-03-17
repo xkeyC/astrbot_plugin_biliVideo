@@ -29,8 +29,6 @@ from .utils.browser import close_browser
 class BiliVideoPlugin(Star):
     """BiliVideo 视频总结插件"""
 
-    _summary_cache: dict[str, dict] = {}
-
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
 
