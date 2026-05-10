@@ -679,7 +679,9 @@ class BiliVideoPlugin(Star):
             "\n"
             "📌 基本命令:\n"
             "  /总结 <B站视频链接或BV号>\n"
-            "    → 为指定视频生成AI总结\n"
+            "    → 为指定视频生成AI总结（已有总结时直接引用）\n"
+            "  /重新总结 <B站视频链接或BV号>\n"
+            "    → 无视已有总结记录，重新生成AI总结\n"
             "  /最新视频 <UP主UID、空间链接或昵称>\n"
             "    → 获取UP主最新视频并生成总结\n"
             "\n"
@@ -706,6 +708,7 @@ class BiliVideoPlugin(Star):
             "💡 示例:\n"
             "  /总结 https://www.bilibili.com/video/BV1xx...\n"
             "  /总结 BV1xx411c7mD\n"
+            "  /重新总结 BV1xx411c7mD\n"
             "  /订阅 123456789\n"
             "  /添加推送群 123456789\n"
             "\n"
@@ -803,7 +806,7 @@ class BiliVideoPlugin(Star):
         self.bili_cookies = {}
         yield event.plain_result("✅ 已退出B站登录")
 
-    @filter.command("总结", alias={"BiliVideo", "视频总结", "总结"})
+    @filter.command("总结", alias={"BiliVideo", "视频总结", "总结", "重新总结", "resummary"})
     async def generate_note_cmd(self, event: AstrMessageEvent):
         """手动为视频生成总结"""
         self._log("═══════ [总结命令] 开始处理 ═══════")
@@ -837,6 +840,8 @@ class BiliVideoPlugin(Star):
         except Exception as e:
             self._log(f"[总结命令] 解析 message_obj 异常: {e}")
 
+        force_regenerate = self._is_force_summary_command(raw_msg, full_text)
+        self._log(f"[总结命令] force_regenerate={force_regenerate}")
         logger.info(f"总结命令收到消息: {raw_msg}")
 
         video_url = ""
@@ -916,7 +921,7 @@ class BiliVideoPlugin(Star):
 
         self._log_always(f"[总结命令] 提取到 bvid={bvid}")
 
-        if bvid:
+        if bvid and not force_regenerate:
             history = await self._find_bvid_history(event, bvid)
             if history["summary"]:
                 self._log_always(f"[总结命令] 已有总结: {history['summary']}")
@@ -926,6 +931,8 @@ class BiliVideoPlugin(Star):
                 ])
                 self._log_always("═══════ [总结命令] 结束(引用旧总结) ═══════")
                 return
+        elif bvid:
+            self._log_always("[总结命令] 重新总结指令命中，跳过去重检查")
 
         progress_msg = self.config.get(
             "summary_progress_template",
@@ -941,6 +948,19 @@ class BiliVideoPlugin(Star):
         self._log(f"[总结命令] 输出组件数: {len(result)}")
         self._log_always("═══════ [总结命令] 结束(成功) ═══════")
         yield event.chain_result(result)
+
+    @staticmethod
+    def _is_force_summary_command(*texts: str) -> bool:
+        """判断是否使用了强制重新总结指令。"""
+        force_commands = ("/重新总结", "重新总结", "/resummary", "resummary")
+        for text in texts:
+            stripped = str(text or "").strip()
+            if any(
+                stripped == command or stripped.startswith(f"{command} ")
+                for command in force_commands
+            ):
+                return True
+        return False
 
     def _extract_bvid_from_reply(self, event: AstrMessageEvent) -> str | None:
         """从引用消息中提取 BV 号"""
