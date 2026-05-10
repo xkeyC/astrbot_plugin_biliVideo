@@ -308,6 +308,10 @@ class BiliVideoPlugin(Star):
         :param bvid: BV号，用于标记消息
         :return: 消息链组件列表（图片或文本）
         """
+        if len(note_parts) == 1 and str(note_parts[0]).strip() == "❌ 总结失败":
+            self._log("[Render] 总结生成失败，仅返回错误提示")
+            return [Plain("❌ 总结失败")]
+
         result = []
         
         if bvid:
@@ -675,7 +679,9 @@ class BiliVideoPlugin(Star):
             "\n"
             "📌 基本命令:\n"
             "  /总结 <B站视频链接或BV号>\n"
-            "    → 为指定视频生成AI总结\n"
+            "    → 为指定视频生成AI总结（已有总结时直接引用）\n"
+            "  /重新总结 <B站视频链接或BV号>\n"
+            "    → 无视已有总结记录，重新生成AI总结\n"
             "  /最新视频 <UP主UID、空间链接或昵称>\n"
             "    → 获取UP主最新视频并生成总结\n"
             "\n"
@@ -702,6 +708,7 @@ class BiliVideoPlugin(Star):
             "💡 示例:\n"
             "  /总结 https://www.bilibili.com/video/BV1xx...\n"
             "  /总结 BV1xx411c7mD\n"
+            "  /重新总结 BV1xx411c7mD\n"
             "  /订阅 123456789\n"
             "  /添加推送群 123456789\n"
             "\n"
@@ -799,7 +806,7 @@ class BiliVideoPlugin(Star):
         self.bili_cookies = {}
         yield event.plain_result("✅ 已退出B站登录")
 
-    @filter.command("总结", alias={"BiliVideo", "视频总结", "总结"})
+    @filter.command("总结", alias={"BiliVideo", "视频总结", "总结", "重新总结", "resummary"})
     async def generate_note_cmd(self, event: AstrMessageEvent):
         """手动为视频生成总结"""
         self._log("═══════ [总结命令] 开始处理 ═══════")
@@ -833,6 +840,8 @@ class BiliVideoPlugin(Star):
         except Exception as e:
             self._log(f"[总结命令] 解析 message_obj 异常: {e}")
 
+        force_regenerate = self._is_force_summary_command(raw_msg, full_text)
+        self._log(f"[总结命令] force_regenerate={force_regenerate}")
         logger.info(f"总结命令收到消息: {raw_msg}")
 
         video_url = ""
@@ -912,7 +921,7 @@ class BiliVideoPlugin(Star):
 
         self._log_always(f"[总结命令] 提取到 bvid={bvid}")
 
-        if bvid:
+        if bvid and not force_regenerate:
             history = await self._find_bvid_history(event, bvid)
             if history["summary"]:
                 self._log_always(f"[总结命令] 已有总结: {history['summary']}")
@@ -922,6 +931,8 @@ class BiliVideoPlugin(Star):
                 ])
                 self._log_always("═══════ [总结命令] 结束(引用旧总结) ═══════")
                 return
+        elif bvid:
+            self._log_always("[总结命令] 重新总结指令命中，跳过去重检查")
 
         progress_msg = self.config.get(
             "summary_progress_template",
@@ -937,6 +948,19 @@ class BiliVideoPlugin(Star):
         self._log(f"[总结命令] 输出组件数: {len(result)}")
         self._log_always("═══════ [总结命令] 结束(成功) ═══════")
         yield event.chain_result(result)
+
+    @staticmethod
+    def _is_force_summary_command(*texts: str) -> bool:
+        """判断是否使用了强制重新总结指令。"""
+        force_commands = ("/重新总结", "重新总结", "/resummary", "resummary")
+        for text in texts:
+            stripped = str(text or "").strip()
+            if any(
+                stripped == command or stripped.startswith(f"{command} ")
+                for command in force_commands
+            ):
+                return True
+        return False
 
     def _extract_bvid_from_reply(self, event: AstrMessageEvent) -> str | None:
         """从引用消息中提取 BV 号"""
@@ -1485,7 +1509,7 @@ class BiliVideoPlugin(Star):
             self._log(f"[生成总结] 异常: {e}")
             self._log("═══════ [生成总结] 结束(异常) ═══════")
             logger.error(f"总结生成异常: {e}", exc_info=True)
-            return [f"❌ 总结生成失败: {str(e)}"]
+            return ["❌ 总结失败"]
 
     async def _ask_llm(self, prompt: str) -> str:
         """根据配置调用 LLM（AstrBot 内置 或 OpenAI 兼容 API）"""
@@ -1538,10 +1562,15 @@ class BiliVideoPlugin(Star):
             payload = {
                 "model": self.llm_model,
                 "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
             }
 
             import aiohttp as _aiohttp
-            timeout = _aiohttp.ClientTimeout(total=120)
+            timeout = _aiohttp.ClientTimeout(
+                total=None,
+                sock_connect=30,
+                sock_read=600,
+            )
             async with _aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status != 200:
@@ -1549,9 +1578,63 @@ class BiliVideoPlugin(Star):
                         logger.error(f"OpenAI 兼容 API 返回 HTTP {resp.status}: {body[:500]}")
                         return f"❌ LLM API 返回错误 (HTTP {resp.status})"
 
-                    data = await resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    self._log(f"[AskLLM/OpenAI] 响应长度={len(content)}")
+                    import codecs
+
+                    chunks: list[str] = []
+                    buffer = ""
+                    utf8_decoder = codecs.getincrementaldecoder("utf-8")()
+
+                    def parse_sse_line(line: str) -> bool:
+                        line = line.strip()
+                        if not line or line.startswith(":"):
+                            return False
+                        if not line.startswith("data:"):
+                            return False
+
+                        data_text = line[5:].strip()
+                        if data_text == "[DONE]":
+                            return True
+
+                        try:
+                            data = json.loads(data_text)
+                        except json.JSONDecodeError:
+                            self._log(f"[AskLLM/OpenAI] 忽略无法解析的 SSE 数据: {data_text[:100]}")
+                            return False
+
+                        for choice in data.get("choices", []):
+                            delta = choice.get("delta") or {}
+                            content_piece = delta.get("content")
+                            if content_piece:
+                                chunks.append(content_piece)
+
+                            # 兼容部分服务商在流式响应中仍返回 message.content 的情况
+                            message = choice.get("message") or {}
+                            content_piece = message.get("content")
+                            if content_piece:
+                                chunks.append(content_piece)
+
+                        return False
+
+                    async for raw_chunk in resp.content.iter_any():
+                        if not raw_chunk:
+                            continue
+                        buffer += utf8_decoder.decode(raw_chunk)
+
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            if parse_sse_line(line):
+                                content = "".join(chunks)
+                                self._log(f"[AskLLM/OpenAI] SSE 响应长度={len(content)}")
+                                return content
+
+                    buffer += utf8_decoder.decode(b"", final=True)
+                    if buffer and parse_sse_line(buffer):
+                        content = "".join(chunks)
+                        self._log(f"[AskLLM/OpenAI] SSE 响应长度={len(content)}")
+                        return content
+
+                    content = "".join(chunks)
+                    self._log(f"[AskLLM/OpenAI] SSE 响应结束, 长度={len(content)}")
                     return content
 
         except Exception as e:
