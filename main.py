@@ -1578,45 +1578,60 @@ class BiliVideoPlugin(Star):
                         logger.error(f"OpenAI 兼容 API 返回 HTTP {resp.status}: {body[:500]}")
                         return f"❌ LLM API 返回错误 (HTTP {resp.status})"
 
+                    import codecs
+
                     chunks: list[str] = []
                     buffer = ""
+                    utf8_decoder = codecs.getincrementaldecoder("utf-8")()
+
+                    def parse_sse_line(line: str) -> bool:
+                        line = line.strip()
+                        if not line or line.startswith(":"):
+                            return False
+                        if not line.startswith("data:"):
+                            return False
+
+                        data_text = line[5:].strip()
+                        if data_text == "[DONE]":
+                            return True
+
+                        try:
+                            data = json.loads(data_text)
+                        except json.JSONDecodeError:
+                            self._log(f"[AskLLM/OpenAI] 忽略无法解析的 SSE 数据: {data_text[:100]}")
+                            return False
+
+                        for choice in data.get("choices", []):
+                            delta = choice.get("delta") or {}
+                            content_piece = delta.get("content")
+                            if content_piece:
+                                chunks.append(content_piece)
+
+                            # 兼容部分服务商在流式响应中仍返回 message.content 的情况
+                            message = choice.get("message") or {}
+                            content_piece = message.get("content")
+                            if content_piece:
+                                chunks.append(content_piece)
+
+                        return False
 
                     async for raw_chunk in resp.content.iter_any():
                         if not raw_chunk:
                             continue
-                        buffer += raw_chunk.decode("utf-8", errors="ignore")
+                        buffer += utf8_decoder.decode(raw_chunk)
 
                         while "\n" in buffer:
                             line, buffer = buffer.split("\n", 1)
-                            line = line.strip()
-                            if not line or line.startswith(":"):
-                                continue
-                            if not line.startswith("data:"):
-                                continue
-
-                            data_text = line[5:].strip()
-                            if data_text == "[DONE]":
+                            if parse_sse_line(line):
                                 content = "".join(chunks)
                                 self._log(f"[AskLLM/OpenAI] SSE 响应长度={len(content)}")
                                 return content
 
-                            try:
-                                data = json.loads(data_text)
-                            except json.JSONDecodeError:
-                                self._log(f"[AskLLM/OpenAI] 忽略无法解析的 SSE 数据: {data_text[:100]}")
-                                continue
-
-                            for choice in data.get("choices", []):
-                                delta = choice.get("delta") or {}
-                                content_piece = delta.get("content")
-                                if content_piece:
-                                    chunks.append(content_piece)
-
-                                # 兼容部分服务商在流式响应中仍返回 message.content 的情况
-                                message = choice.get("message") or {}
-                                content_piece = message.get("content")
-                                if content_piece:
-                                    chunks.append(content_piece)
+                    buffer += utf8_decoder.decode(b"", final=True)
+                    if buffer and parse_sse_line(buffer):
+                        content = "".join(chunks)
+                        self._log(f"[AskLLM/OpenAI] SSE 响应长度={len(content)}")
+                        return content
 
                     content = "".join(chunks)
                     self._log(f"[AskLLM/OpenAI] SSE 响应结束, 长度={len(content)}")
