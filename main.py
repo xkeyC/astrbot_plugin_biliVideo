@@ -308,6 +308,10 @@ class BiliVideoPlugin(Star):
         :param bvid: BV号，用于标记消息
         :return: 消息链组件列表（图片或文本）
         """
+        if len(note_parts) == 1 and str(note_parts[0]).strip() == "❌ 总结失败":
+            self._log("[Render] 总结生成失败，仅返回错误提示")
+            return [Plain("❌ 总结失败")]
+
         result = []
         
         if bvid:
@@ -1485,7 +1489,7 @@ class BiliVideoPlugin(Star):
             self._log(f"[生成总结] 异常: {e}")
             self._log("═══════ [生成总结] 结束(异常) ═══════")
             logger.error(f"总结生成异常: {e}", exc_info=True)
-            return [f"❌ 总结生成失败: {str(e)}"]
+            return ["❌ 总结失败"]
 
     async def _ask_llm(self, prompt: str) -> str:
         """根据配置调用 LLM（AstrBot 内置 或 OpenAI 兼容 API）"""
@@ -1538,10 +1542,15 @@ class BiliVideoPlugin(Star):
             payload = {
                 "model": self.llm_model,
                 "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
             }
 
             import aiohttp as _aiohttp
-            timeout = _aiohttp.ClientTimeout(total=120)
+            timeout = _aiohttp.ClientTimeout(
+                total=None,
+                sock_connect=30,
+                sock_read=600,
+            )
             async with _aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status != 200:
@@ -1549,9 +1558,48 @@ class BiliVideoPlugin(Star):
                         logger.error(f"OpenAI 兼容 API 返回 HTTP {resp.status}: {body[:500]}")
                         return f"❌ LLM API 返回错误 (HTTP {resp.status})"
 
-                    data = await resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    self._log(f"[AskLLM/OpenAI] 响应长度={len(content)}")
+                    chunks: list[str] = []
+                    buffer = ""
+
+                    async for raw_chunk in resp.content.iter_any():
+                        if not raw_chunk:
+                            continue
+                        buffer += raw_chunk.decode("utf-8", errors="ignore")
+
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+                            if not line or line.startswith(":"):
+                                continue
+                            if not line.startswith("data:"):
+                                continue
+
+                            data_text = line[5:].strip()
+                            if data_text == "[DONE]":
+                                content = "".join(chunks)
+                                self._log(f"[AskLLM/OpenAI] SSE 响应长度={len(content)}")
+                                return content
+
+                            try:
+                                data = json.loads(data_text)
+                            except json.JSONDecodeError:
+                                self._log(f"[AskLLM/OpenAI] 忽略无法解析的 SSE 数据: {data_text[:100]}")
+                                continue
+
+                            for choice in data.get("choices", []):
+                                delta = choice.get("delta") or {}
+                                content_piece = delta.get("content")
+                                if content_piece:
+                                    chunks.append(content_piece)
+
+                                # 兼容部分服务商在流式响应中仍返回 message.content 的情况
+                                message = choice.get("message") or {}
+                                content_piece = message.get("content")
+                                if content_piece:
+                                    chunks.append(content_piece)
+
+                    content = "".join(chunks)
+                    self._log(f"[AskLLM/OpenAI] SSE 响应结束, 长度={len(content)}")
                     return content
 
         except Exception as e:

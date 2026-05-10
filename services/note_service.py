@@ -112,8 +112,9 @@ class NoteService:
             logger.info("调用 LLM 生成总结...")
             markdown = await llm_ask_func(prompt)
 
-            if not markdown:
-                return ["❌ LLM 生成总结失败"]
+            if not markdown or str(markdown).lstrip().startswith("❌"):
+                logger.error(f"LLM 生成总结失败: {markdown or 'empty response'}")
+                return ["❌ 总结失败"]
 
             if enable_link:
                 video_id = extract_video_id(video_url, "bilibili")
@@ -136,7 +137,7 @@ class NoteService:
 
         except Exception as e:
             logger.error(f"总结生成失败: {e}", exc_info=True)
-            return [f"❌ 总结生成失败: {str(e)}"]
+            return ["❌ 总结失败"]
         finally:
             try:
                 if audio_meta and hasattr(audio_meta, 'file_path'):
