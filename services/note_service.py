@@ -7,6 +7,8 @@ from astrbot.api import logger
 
 from ..downloaders.bilibili_downloader import BilibiliDownloader
 from ..transcriber.bcut import BcutTranscriber
+from ..transcriber.local_multimodal_infra import LocalMultimodalInfraTranscriber
+from ..models.transcriber_model import TranscriptResult
 from ..gpt.prompt_builder import build_prompt
 from ..utils.note_helper import replace_content_markers
 from ..utils.url_parser import extract_video_id
@@ -19,14 +21,89 @@ class NoteService:
     流程: 下载音频 → 获取字幕/转写 → LLM 总结 → 后处理 → 返回 Markdown
     """
 
-    def __init__(self, data_dir: str, cookies: Optional[dict] = None):
+    def __init__(
+        self,
+        data_dir: str,
+        cookies: Optional[dict] = None,
+        asr_provider: str = "bcut",
+        local_infra_base_url: str = "http://127.0.0.1:17890",
+        local_infra_token: str = "",
+        local_infra_model: str = "sensevoice-small-onnx",
+        asr_timeout: int = 600,
+        timestamp_granularity_sec: int = 10,
+        speaker_diarization: bool = True,
+    ):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
+        self._asr_lock = asyncio.Lock()
         self.downloader = BilibiliDownloader(
             data_dir=os.path.join(data_dir, "audio"),
             cookies=cookies,
         )
-        self.transcriber = BcutTranscriber()
+        self.asr_provider = asr_provider.strip().lower().replace("-", "_")
+        if self.asr_provider == "local_multimodal_infra":
+            self.transcriber = LocalMultimodalInfraTranscriber(
+                base_url=local_infra_base_url,
+                token=local_infra_token,
+                model=local_infra_model,
+                timeout=asr_timeout,
+                timestamp_granularity_sec=timestamp_granularity_sec,
+                speaker_diarization=speaker_diarization,
+            )
+        elif self.asr_provider == "bcut":
+            self.transcriber = BcutTranscriber(timeout=asr_timeout)
+        else:
+            raise ValueError(
+                "asr_provider 仅支持 bcut 或 local_multimodal_infra"
+            )
+
+    async def _transcribe_audio(self, file_path: str) -> TranscriptResult:
+        """串行化共享转写器，避免必剪任务状态在并发请求间串线。"""
+        if not hasattr(self, "_asr_lock"):
+            self._asr_lock = asyncio.Lock()
+        async with self._asr_lock:
+            return await asyncio.get_running_loop().run_in_executor(
+                None, lambda: self.transcriber.transcript(file_path)
+            )
+
+    async def extract_content(
+        self,
+        video_url: str,
+        source: str = "auto",
+        quality: str = "fast",
+    ) -> TranscriptResult:
+        """提取平台字幕或使用配置的 ASR 提供商转写。"""
+        source = source.strip().lower()
+        if source not in {"auto", "subtitle", "asr"}:
+            raise ValueError("source 仅支持 auto、subtitle 或 asr")
+
+        if source in {"auto", "subtitle"}:
+            transcript = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: self.downloader.download_subtitles(video_url)
+            )
+            if transcript and transcript.segments:
+                return transcript
+            if source == "subtitle":
+                raise RuntimeError("该视频没有可用的平台字幕")
+
+        audio_meta = None
+        try:
+            audio_format = (
+                "wav" if self.asr_provider == "local_multimodal_infra" else "mp3"
+            )
+            audio_meta = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self.downloader.download(
+                    video_url, quality=quality, audio_format=audio_format
+                ),
+            )
+            transcript = await self._transcribe_audio(audio_meta.file_path)
+            if not transcript or not transcript.segments:
+                raise RuntimeError("ASR 返回了空内容")
+            return transcript
+        finally:
+            if audio_meta and audio_meta.file_path:
+                self._cleanup(audio_meta.file_path)
 
     async def generate_note(
         self,
@@ -65,26 +142,32 @@ class NoteService:
                 lambda: self.downloader.download_subtitles(video_url)
             )
 
-            # 2. 如果没有平台字幕，才下载音频并使用 bcut 转写
+            # 2. 如果没有平台字幕，才下载音频并使用配置的 ASR 提供商转写
             if not transcript or not transcript.segments:
                 logger.info("无平台字幕，开始下载音频并转写...")
+                audio_format = (
+                    "wav"
+                    if self.asr_provider == "local_multimodal_infra"
+                    else "mp3"
+                )
                 audio_meta = await asyncio.get_running_loop().run_in_executor(
                     None,
-                    lambda: self.downloader.download(video_url, quality=quality)
+                    lambda: self.downloader.download(
+                        video_url,
+                        quality=quality,
+                        audio_format=audio_format,
+                    )
                 )
                 logger.info(f"音频下载完成: {audio_meta.title}")
                 
-                logger.info("使用必剪转写...")
-                transcript = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    lambda: self.transcriber.transcript(audio_meta.file_path)
-                )
+                logger.info(f"使用 {self.asr_provider} 转写...")
+                transcript = await self._transcribe_audio(audio_meta.file_path)
             else:
                 logger.info("使用平台字幕，跳过音频下载")
-                # 需要下载音频以获取视频元信息
+                # 只读取视频元信息，避免已有字幕时仍下载整段音频
                 audio_meta = await asyncio.get_running_loop().run_in_executor(
                     None,
-                    lambda: self.downloader.download(video_url, quality=quality)
+                    lambda: self.downloader.get_metadata(video_url)
                 )
                 logger.info(f"获取视频信息: {audio_meta.title}")
 

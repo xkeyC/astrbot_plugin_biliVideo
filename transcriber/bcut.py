@@ -24,8 +24,10 @@ class BcutTranscriber:
         'Content-Type': 'application/json'
     }
 
-    def __init__(self):
+    def __init__(self, timeout: int = 600):
         self.session = requests.Session()
+        self.timeout = max(30, int(timeout))
+        self.request_timeout = min(60, self.timeout)
         self.task_id = None
         self.__etags: List[str] = []
         self.__in_boss_key: Optional[str] = None
@@ -54,7 +56,12 @@ class BcutTranscriber:
             "model_id": "8",
         })
 
-        resp = self.session.post(API_REQ_UPLOAD, data=payload, headers=self.headers)
+        resp = self.session.post(
+            API_REQ_UPLOAD,
+            data=payload,
+            headers=self.headers,
+            timeout=self.request_timeout,
+        )
         resp.raise_for_status()
         resp = resp.json()
         resp_data = resp["data"]
@@ -78,7 +85,8 @@ class BcutTranscriber:
             resp = self.session.put(
                 self.__upload_urls[clip],
                 data=file_binary[start_range:end_range],
-                headers={'Content-Type': 'application/octet-stream'}
+                headers={'Content-Type': 'application/octet-stream'},
+                timeout=self.request_timeout,
             )
             resp.raise_for_status()
             etag = resp.headers.get("Etag", "").strip('"')
@@ -93,7 +101,12 @@ class BcutTranscriber:
             "UploadId": self.__upload_id,
             "model_id": "8",
         })
-        resp = self.session.post(API_COMMIT_UPLOAD, data=data, headers=self.headers)
+        resp = self.session.post(
+            API_COMMIT_UPLOAD,
+            data=data,
+            headers=self.headers,
+            timeout=self.request_timeout,
+        )
         resp.raise_for_status()
         resp = resp.json()
 
@@ -107,7 +120,8 @@ class BcutTranscriber:
         resp = self.session.post(
             API_CREATE_TASK,
             json={"resource": self.__download_url, "model_id": "8"},
-            headers=self.headers
+            headers=self.headers,
+            timeout=self.request_timeout,
         )
         resp.raise_for_status()
         resp = resp.json()
@@ -123,7 +137,8 @@ class BcutTranscriber:
         resp = self.session.get(
             API_QUERY_RESULT,
             params={"model_id": 7, "task_id": self.task_id},
-            headers=self.headers
+            headers=self.headers,
+            timeout=self.request_timeout,
         )
         resp.raise_for_status()
         resp = resp.json()
@@ -143,7 +158,7 @@ class BcutTranscriber:
             self._create_task()
 
             task_resp = None
-            max_retries = 500
+            max_retries = self.timeout
             for i in range(max_retries):
                 task_resp = self._query_result()
 
@@ -181,7 +196,7 @@ class BcutTranscriber:
                 language=result_json.get("language", "zh"),
                 full_text=full_text.strip(),
                 segments=segments,
-                raw=result_json
+                raw={"source": "bcut", **result_json}
             )
 
         except Exception as e:

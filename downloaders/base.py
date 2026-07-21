@@ -18,13 +18,14 @@ class Downloader(ABC):
 
     @abstractmethod
     def download(self, video_url: str, output_dir: Optional[str] = None,
-                 quality: str = "fast") -> AudioDownloadResult:
+                 quality: str = "fast", audio_format: str = "mp3") -> AudioDownloadResult:
         """
         下载音频
 
         :param video_url: 视频链接
         :param output_dir: 输出路径
         :param quality: 音频质量 fast | medium | slow
+        :param audio_format: 输出格式 mp3 | wav
         :return: AudioDownloadResult
         """
         pass

@@ -14,13 +14,20 @@ from typing import List
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.message_components import Plain, Image, Reply
-from astrbot.api import logger
+from astrbot.api import llm_tool, logger
 
 from .services.subscription import SubscriptionManager
-from .services.bilibili_api import get_up_info, get_latest_videos, search_up_by_name, get_video_info, resolve_short_url
+from .services.bilibili_api import (
+    get_latest_videos,
+    get_up_info,
+    get_video_info,
+    resolve_short_url,
+    search_up_by_name,
+    search_videos,
+)
 from .services.bilibili_login import BilibiliLogin
 from .services.note_service import NoteService
-from .utils.url_parser import detect_platform, extract_bilibili_mid
+from .utils.url_parser import detect_platform, extract_bilibili_mid, extract_video_id
 from .utils.md_to_image import render_note_image_async
 from .utils.env_manager import EnvManager
 from .utils.browser import close_browser
@@ -43,7 +50,10 @@ class BiliVideoPlugin(Star):
             logger.info("═══════════ [BiliVideo] Debug 模式已启用 ═══════════")
 
         self._log("══════ [BiliVideo] 插件初始化开始 ══════")
-        self._log(f"配置内容: { {k: v for k, v in self.config.items() if k not in ('cookies',)} }")
+        secret_keys = {"cookies", "llm_api_key", "local_multimodal_infra_token"}
+        self._log(
+            f"配置内容: { {k: v for k, v in self.config.items() if k not in secret_keys} }"
+        )
 
         # Playwright 环境管理器
         self.env_manager = EnvManager(self.data_dir)
@@ -73,6 +83,28 @@ class BiliVideoPlugin(Star):
         self.note_service = NoteService(
             data_dir=self.data_dir,
             cookies=self.bili_cookies if self.bili_cookies else None,
+            asr_provider=str(self.config.get("asr_provider", "bcut")),
+            local_infra_base_url=str(
+                self.config.get(
+                    "local_multimodal_infra_base_url",
+                    "http://127.0.0.1:17890",
+                )
+            ),
+            local_infra_token=str(
+                self.config.get("local_multimodal_infra_token", "")
+            ),
+            local_infra_model=str(
+                self.config.get(
+                    "local_multimodal_infra_model", "sensevoice-small-onnx"
+                )
+            ),
+            asr_timeout=int(self.config.get("asr_timeout", 600)),
+            timestamp_granularity_sec=int(
+                self.config.get("asr_timestamp_granularity_sec", 10)
+            ),
+            speaker_diarization=bool(
+                self.config.get("asr_speaker_diarization", True)
+            ),
         )
 
         # 从配置加载推送目标（与命令添加的合并，不重复）
@@ -134,6 +166,176 @@ class BiliVideoPlugin(Star):
         except Exception as e:
             logger.error(f"Playwright 初始化失败: {e}")
             return False
+
+    async def _resolve_tool_bvid(self, video: str) -> str:
+        """把 BV 号、长链接或 b23 短链统一为 BV 号。"""
+        value = (video or "").strip()
+        if "b23.tv" in value.lower():
+            value = await resolve_short_url(value) or value
+        bvid = extract_video_id(value, "bilibili")
+        if not bvid:
+            raise ValueError("请提供有效的 B站 BV 号、视频链接或 b23.tv 短链")
+        return bvid
+
+    @staticmethod
+    def _transcript_tool_payload(transcript, max_chars: int) -> dict:
+        max_chars = min(50000, max(1000, int(max_chars)))
+        lines = []
+        used = 0
+        returned_segments = 0
+        for segment in transcript.segments:
+            total_seconds = max(0, int(segment.start))
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            timestamp = (
+                f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                if hours
+                else f"{minutes:02d}:{seconds:02d}"
+            )
+            speaker = f" [{segment.speaker}]" if segment.speaker else ""
+            line = f"[{timestamp}]{speaker} {segment.text.strip()}"
+            if used + len(line) + 1 > max_chars:
+                remaining = max_chars - used
+                if remaining > 0:
+                    lines.append(line[:remaining])
+                break
+            lines.append(line)
+            used += len(line) + 1
+            returned_segments += 1
+
+        raw = transcript.raw if isinstance(transcript.raw, dict) else {}
+        source_used = raw.get("source") or "unknown"
+        return {
+            "source": source_used,
+            "language": transcript.language,
+            "content": "\n".join(lines),
+            "text_length": len(transcript.full_text),
+            "total_segments": len(transcript.segments),
+            "returned_segments": returned_segments,
+            "truncated": returned_segments < len(transcript.segments),
+        }
+
+    # ==================== Agent 工具 ====================
+
+    @llm_tool("bilibili_search_videos")
+    async def bilibili_search_videos(
+        self,
+        event: AstrMessageEvent,
+        keyword: str,
+        page: int = 1,
+        limit: int = 10,
+        order: str = "totalrank",
+    ) -> str:
+        """搜索 B站视频。当用户想查找某个主题、关键词或 UP主相关视频时调用。
+
+        Args:
+            keyword(string): 视频搜索关键词。
+            page(number): 可选。结果页码，默认 1。
+            limit(number): 可选。返回数量，范围 1-20，默认 10。
+            order(string): 可选。排序方式：totalrank(综合)、click(播放)、pubdate(最新)、dm(弹幕)、stow(收藏)。
+
+        Returns:
+            str: JSON 格式的视频搜索结果。
+        """
+        if not self._check_access(event):
+            return json.dumps({"success": False, "error": "当前会话无权使用 B站工具"}, ensure_ascii=False)
+        if not keyword.strip():
+            return json.dumps({"success": False, "error": "keyword 不能为空"}, ensure_ascii=False)
+        try:
+            videos = await search_videos(
+                keyword,
+                page=page,
+                count=limit,
+                order=order,
+                cookies=self.bili_cookies or None,
+            )
+            return json.dumps(
+                {
+                    "success": True,
+                    "keyword": keyword,
+                    "page": max(1, int(page)),
+                    "count": len(videos),
+                    "videos": videos,
+                },
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 搜索视频失败: {e}")
+            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+    @llm_tool("bilibili_get_video_info")
+    async def bilibili_get_video_info(
+        self,
+        event: AstrMessageEvent,
+        video: str,
+    ) -> str:
+        """获取 B站视频详情。适合在提取内容前核对标题、UP主、简介、时长和播放数据。
+
+        Args:
+            video(string): BV 号、完整视频链接或 b23.tv 短链。
+
+        Returns:
+            str: JSON 格式的视频详情。
+        """
+        if not self._check_access(event):
+            return json.dumps({"success": False, "error": "当前会话无权使用 B站工具"}, ensure_ascii=False)
+        try:
+            bvid = await self._resolve_tool_bvid(video)
+            info = await get_video_info(bvid, cookies=self.bili_cookies or None)
+            if not info:
+                raise RuntimeError(f"未找到视频 {bvid}")
+            info["url"] = f"https://www.bilibili.com/video/{bvid}"
+            return json.dumps({"success": True, "video": info}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 获取视频详情失败: {e}")
+            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+    @llm_tool("bilibili_get_video_content")
+    async def bilibili_get_video_content(
+        self,
+        event: AstrMessageEvent,
+        video: str,
+        source: str = "auto",
+        max_chars: int = 20000,
+    ) -> str:
+        """提取 B站视频的字幕或 ASR 转写，返回带时间戳的内容。先搜索再阅读视频时调用。
+
+        Args:
+            video(string): BV 号、完整视频链接或 b23.tv 短链。
+            source(string): 可选。auto 优先平台字幕、无字幕时 ASR；subtitle 只取字幕；asr 强制使用配置的 ASR 提供商。
+            max_chars(number): 可选。返回内容最大字符数，范围 1000-50000，默认 20000。
+
+        Returns:
+            str: JSON 格式的视频信息、内容来源和带时间戳文本。
+        """
+        if not self._check_access(event):
+            return json.dumps({"success": False, "error": "当前会话无权使用 B站工具"}, ensure_ascii=False)
+        try:
+            bvid = await self._resolve_tool_bvid(video)
+            video_url = f"https://www.bilibili.com/video/{bvid}"
+            info_task = get_video_info(bvid, cookies=self.bili_cookies or None)
+            transcript_task = self.note_service.extract_content(
+                video_url,
+                source=source,
+                quality=self.config.get("download_quality", "fast"),
+            )
+            info, transcript = await asyncio.gather(info_task, transcript_task)
+            content = self._transcript_tool_payload(transcript, max_chars)
+            return json.dumps(
+                {
+                    "success": True,
+                    "bvid": bvid,
+                    "url": video_url,
+                    "title": (info or {}).get("title", ""),
+                    "uploader": (info or {}).get("owner_name", ""),
+                    "duration": (info or {}).get("duration", 0),
+                    **content,
+                },
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 提取视频内容失败: {e}", exc_info=True)
+            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
     def _load_push_targets_from_config(self):
         """从配置文件加载推送目标到 SubscriptionManager"""
@@ -523,11 +725,11 @@ class BiliVideoPlugin(Star):
             need_summary = not history["summary"] and self.config.get("detect_auto_summary", False)
             
             if history["summary"]:
-                self._log_always(f"[AutoDetect] 已有总结，跳过")
+                self._log_always("[AutoDetect] 已有总结，跳过")
                 return
             
             if history["video_info"] and not need_summary:
-                self._log_always(f"[AutoDetect] 已有视频信息，跳过")
+                self._log_always("[AutoDetect] 已有视频信息，跳过")
                 return
 
             if need_push_info:
@@ -989,7 +1191,7 @@ class BiliVideoPlugin(Star):
                                 if bv_match:
                                     return bv_match.group(1)
                     
-                    self._log_always(f"[ReplyExtract] 引用消息中未找到 BV 号")
+                    self._log_always("[ReplyExtract] 引用消息中未找到 BV 号")
                     return None
         except Exception as e:
             self._log_always(f"[ReplyExtract] 解析引用消息异常: {e}")
@@ -1218,11 +1420,11 @@ class BiliVideoPlugin(Star):
                             logger.info(f"从视频获取到UP主名称: {search_result['name']}")
                         else:
                             search_result = {"mid": mid, "name": f"UP主_{mid}"}
-                            logger.warning(f"无法获取UP主名称，使用 UID 兜底")
+                            logger.warning("无法获取UP主名称，使用 UID 兜底")
                     else:
                         # 最后的兜底：使用 UID 作为名称
                         search_result = {"mid": mid, "name": f"UP主_{mid}"}
-                        logger.warning(f"无法获取UP主名称，使用 UID 兜底")
+                        logger.warning("无法获取UP主名称，使用 UID 兜底")
                 except Exception as e:
                     search_result = {"mid": mid, "name": f"UP主_{mid}"}
                     logger.warning(f"获取视频列表失败: {e}，使用 UID 兜底")
@@ -1540,7 +1742,7 @@ class BiliVideoPlugin(Star):
                 self._log(f"[AskLLM/AstrBot] response 是 str, 长度={len(response)}")
                 return response
             else:
-                self._log(f"[AskLLM/AstrBot] response 转 str")
+                self._log("[AskLLM/AstrBot] response 转 str")
                 return str(response)
 
         except Exception as e:

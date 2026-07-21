@@ -1,3 +1,4 @@
+import re
 import uuid
 from typing import Optional, List, Dict
 
@@ -12,6 +13,10 @@ BILIBILI_API_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://www.bilibili.com',
 }
+
+
+def _strip_search_highlight(text: str) -> str:
+    return re.sub(r"</?em(?:\s+class=\"keyword\")?>", "", text or "")
 
 
 def _build_headers(cookies: Optional[dict] = None) -> dict:
@@ -222,6 +227,75 @@ async def _search_up_fallback(keyword: str, cookies: Optional[dict] = None) -> O
         return None
 
 
+async def search_videos(
+    keyword: str,
+    page: int = 1,
+    count: int = 10,
+    order: str = "totalrank",
+    cookies: Optional[dict] = None,
+) -> List[Dict]:
+    """按关键词搜索 B站视频。"""
+    allowed_orders = {"totalrank", "click", "pubdate", "dm", "stow"}
+    if order not in allowed_orders:
+        order = "totalrank"
+    page = max(1, int(page))
+    count = min(20, max(1, int(count)))
+    params = {
+        "search_type": "video",
+        "keyword": keyword.strip(),
+        "page": page,
+        "order": order,
+        "duration": 0,
+        "tids": 0,
+    }
+    signed_params = await sign_wbi_params(params, cookies=cookies)
+    url = "https://api.bilibili.com/x/web-interface/wbi/search/type"
+
+    try:
+        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
+            async with session.get(
+                url,
+                params=signed_params,
+                headers=_build_headers(cookies),
+            ) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                payload = await resp.json()
+                if payload.get("code") != 0:
+                    raise RuntimeError(
+                        f"code={payload.get('code')}, msg={payload.get('message')}"
+                    )
+
+        results = (payload.get("data") or {}).get("result") or []
+        videos = []
+        for item in results[:count]:
+            bvid = item.get("bvid") or ""
+            if not bvid:
+                continue
+            videos.append(
+                {
+                    "bvid": bvid,
+                    "title": _strip_search_highlight(item.get("title") or ""),
+                    "description": _strip_search_highlight(
+                        item.get("description") or ""
+                    ),
+                    "author": item.get("author") or "",
+                    "mid": str(item.get("mid") or ""),
+                    "duration": item.get("duration") or "",
+                    "play": item.get("play") or 0,
+                    "danmaku": item.get("video_review") or 0,
+                    "favorites": item.get("favorites") or 0,
+                    "pubdate": item.get("pubdate") or 0,
+                    "pic": item.get("pic") or "",
+                    "url": f"https://www.bilibili.com/video/{bvid}",
+                }
+            )
+        return videos
+    except Exception as e:
+        logger.error(f"搜索B站视频异常: {e}")
+        raise RuntimeError(f"搜索B站视频失败: {e}") from e
+
+
 async def get_video_info(bvid: str, cookies: Optional[dict] = None) -> Optional[Dict]:
     """
     获取视频详情信息
@@ -260,6 +334,11 @@ async def get_video_info(bvid: str, cookies: Optional[dict] = None) -> Optional[
                     "view": stat.get("view", 0),
                     "danmaku": stat.get("danmaku", 0),
                     "like": stat.get("like", 0),
+                    "coin": stat.get("coin", 0),
+                    "favorite": stat.get("favorite", 0),
+                    "share": stat.get("share", 0),
+                    "duration": d.get("duration", 0),
+                    "pages": d.get("pages") or [],
                 }
     except Exception as e:
         logger.error(f"获取视频信息异常: {e}")

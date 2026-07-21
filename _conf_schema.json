@@ -5,6 +5,56 @@
     "default": false,
     "hint": "开启后将输出详细的 Debug 级别日志，方便排查问题。正常使用时请关闭"
   },
+  "asr_provider": {
+    "description": "ASR 提供商",
+    "type": "string",
+    "default": "bcut",
+    "options": [
+      "bcut",
+      "local_multimodal_infra"
+    ],
+    "hint": "bcut 使用必剪公共接口；local_multimodal_infra 使用本地多模态服务。平台字幕始终优先，只有无字幕或 Agent 强制 source=asr 时才调用 ASR"
+  },
+  "local_multimodal_infra_base_url": {
+    "description": "local-multimodal-infra 地址",
+    "type": "string",
+    "default": "http://127.0.0.1:17890",
+    "hint": "Controller 地址，不要包含 /rpc/infer 路径"
+  },
+  "local_multimodal_infra_token": {
+    "description": "local-multimodal-infra 推理令牌",
+    "type": "string",
+    "default": "",
+    "hint": "对应 LOCAL_MCP_INFER_TOKENS 中的一个令牌；服务未启用推理鉴权时留空"
+  },
+  "local_multimodal_infra_model": {
+    "description": "local-multimodal-infra ASR 模型",
+    "type": "string",
+    "default": "sensevoice-small-onnx",
+    "hint": "建议使用能返回时间轴的 sensevoice-small-onnx"
+  },
+  "asr_timeout": {
+    "description": "ASR 超时时间（秒）",
+    "type": "int",
+    "default": 600,
+    "min": 30,
+    "max": 1800,
+    "hint": "音频上传和本地推理的最长等待时间"
+  },
+  "asr_timestamp_granularity_sec": {
+    "description": "本地 ASR 时间轴粒度（秒）",
+    "type": "int",
+    "default": 10,
+    "min": 1,
+    "max": 120,
+    "hint": "local-multimodal-infra 输出时间轴的目标分段粒度"
+  },
+  "asr_speaker_diarization": {
+    "description": "本地 ASR 说话人分离",
+    "type": "bool",
+    "default": true,
+    "hint": "由 local-multimodal-infra 为时间轴片段添加 speaker 标签"
+  },
   "llm_provider": {
     "description": "LLM 提供者",
     "type": "string",

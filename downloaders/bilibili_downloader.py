@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import uuid
 from typing import Optional, List
 
 import yt_dlp
@@ -38,24 +39,31 @@ class BilibiliDownloader(Downloader):
         video_url: str,
         output_dir: Optional[str] = None,
         quality: str = "fast",
+        audio_format: str = "mp3",
     ) -> AudioDownloadResult:
         """下载B站视频的音频"""
+        if audio_format not in {"mp3", "wav"}:
+            raise ValueError("audio_format 仅支持 mp3 或 wav")
         if output_dir is None:
             output_dir = self.data_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
+        request_suffix = uuid.uuid4().hex
+        output_path = os.path.join(
+            output_dir, f"%(id)s-{request_suffix}.%(ext)s"
+        )
+
+        postprocessor = {
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': audio_format,
+        }
+        if audio_format == "mp3":
+            postprocessor['preferredquality'] = QUALITY_MAP.get(quality, '64')
 
         ydl_opts = {
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': output_path,
-            'postprocessors': [
-                {
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': QUALITY_MAP.get(quality, '64'),
-                }
-            ],
+            'postprocessors': [postprocessor],
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
@@ -70,7 +78,9 @@ class BilibiliDownloader(Downloader):
             title = info.get("title")
             duration = info.get("duration", 0)
             cover_url = info.get("thumbnail")
-            audio_path = os.path.join(output_dir, f"{video_id}.mp3")
+            audio_path = os.path.join(
+                output_dir, f"{video_id}-{request_suffix}.{audio_format}"
+            )
 
         return AudioDownloadResult(
             file_path=audio_path,
@@ -79,6 +89,30 @@ class BilibiliDownloader(Downloader):
             cover_url=cover_url,
             platform="bilibili",
             video_id=video_id,
+            raw_info=info,
+        )
+
+    def get_metadata(self, video_url: str) -> AudioDownloadResult:
+        """只获取视频元信息，不下载音视频。"""
+        ydl_opts = {
+            'skip_download': True,
+            'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+        }
+        if self.cookies_file and os.path.exists(self.cookies_file):
+            ydl_opts['cookiefile'] = self.cookies_file
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+
+        return AudioDownloadResult(
+            file_path="",
+            title=info.get("title") or info.get("id") or "未知标题",
+            duration=float(info.get("duration") or 0),
+            cover_url=info.get("thumbnail"),
+            platform="bilibili",
+            video_id=info.get("id") or self._extract_video_id(video_url) or "",
             raw_info=info,
         )
 

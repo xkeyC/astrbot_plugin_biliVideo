@@ -1,5 +1,21 @@
 # 更新日志
 
+## v1.1.0 (2026-07-21)
+
+### 新增
+
+- ASR 提供商可选必剪公共接口或 `local-multimodal-infra`
+- 本地 ASR 使用任务创建、签名上传、等待结果的完整 RPC 调用链，保留时间轴和说话人标签
+- 新增 `bilibili_search_videos`、`bilibili_get_video_info`、`bilibili_get_video_content` Agent 工具
+- 内容提取支持 `auto`、`subtitle`、`asr` 三种来源策略和返回长度限制
+
+### 优化
+
+- 有平台字幕时只读取视频元信息，不再额外下载整段音频
+- 串行化共享 ASR 客户端，避免并发必剪任务状态互相覆盖
+- 音频临时文件使用请求级唯一名称，避免并发提取同一视频时互相删除
+- 调试日志不再输出 LLM API Key 和本地推理 Token
+
 ## v1.0.2 (2026-03-01)
 
 ### 修复

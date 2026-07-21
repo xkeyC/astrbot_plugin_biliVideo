@@ -5,7 +5,7 @@
 
   <br/>
 
-  <img src="https://img.shields.io/badge/version-v1.0.2-blue" />
+  <img src="https://img.shields.io/badge/version-v1.1.0-blue" />
   <img src="https://img.shields.io/badge/AstrBot-v4.0+-green" />
   <img src="https://img.shields.io/badge/platform-Bilibili-ff69b4" />
   <img src="https://img.shields.io/badge/license-MIT-orange" />
@@ -122,6 +122,18 @@ apt install -y ffmpeg
 
 > **💡 提示**：设置推送目标后，所有订阅的新视频总结将**只推送到指定的群/用户**，而不是发起订阅的群。未设置时默认推送到订阅来源群。
 
+### Agent 工具
+
+插件会向 AstrBot Agent 注册以下工具：
+
+| 工具 | 说明 |
+|------|------|
+| `bilibili_search_videos` | 按关键词搜索视频，支持综合、播放、最新、弹幕和收藏排序 |
+| `bilibili_get_video_info` | 获取标题、UP主、简介、时长、分P和播放互动数据 |
+| `bilibili_get_video_content` | 提取带时间戳的视频内容；`auto` 优先字幕，`subtitle` 只取字幕，`asr` 强制转写 |
+
+内容工具默认最多返回 20000 字符，Agent 可通过 `max_chars` 在 1000-50000 之间调整。它与总结命令共用访问控制和 B站登录 Cookie。
+
 ### 使用示例
 
 ```
@@ -143,6 +155,12 @@ apt install -y ffmpeg
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `output_image` | `true` | 总结以图片形式发送 |
+| `asr_provider` | `bcut` | 无平台字幕时使用 `bcut`（必剪公共接口）或 `local_multimodal_infra` |
+| `local_multimodal_infra_base_url` | `http://127.0.0.1:17890` | local-multimodal-infra Controller 地址 |
+| `local_multimodal_infra_token` | 空 | 可选推理 Bearer Token，对应服务端 `LOCAL_MCP_INFER_TOKENS` |
+| `local_multimodal_infra_model` | `sensevoice-small-onnx` | 本地 ASR 模型 |
+| `asr_timestamp_granularity_sec` | `10` | 本地 ASR 时间轴目标粒度 |
+| `asr_speaker_diarization` | `true` | 本地 ASR 说话人分离 |
 | `mobile_output` | `false` | 移动端优化输出（更大字体、紧凑布局） |
 | `note_style` | `professional` | 总结风格：`concise` / `detailed` / `professional` |
 | `enable_link` | `true` | 嵌入时间戳标记 |
@@ -176,6 +194,8 @@ apt install -y ffmpeg
 | aiohttp | Python | 异步 HTTP 请求 |
 | requests | Python | HTTP 请求 |
 | markdown | Python | Markdown → HTML |
+
+> **隐私提示**：`bcut` 会把音频上传到必剪公共接口。需要音频始终留在自有环境时，请选择 `local_multimodal_infra`。本地模式使用 `/rpc/infer` 的任务上传链路，因此可保留 SenseVoice 的时间轴和说话人标签。
 
 > Python 依赖和 Playwright Chromium 浏览器会在插件首次使用图片输出时自动安装。
 
@@ -273,11 +293,23 @@ Scan the QR code with the Bilibili mobile app.
 > **💡 Tip**: `<creator>` accepts numeric UID, space link URL, or creator nickname.
 > When push targets are configured, summaries are sent **only** to those targets.
 
+### Agent Tools
+
+| Tool | Description |
+|------|-------------|
+| `bilibili_search_videos` | Search videos by keyword with configurable ordering |
+| `bilibili_get_video_info` | Read metadata, uploader, duration, pages, and statistics |
+| `bilibili_get_video_content` | Extract timestamped subtitles or ASR output using `auto`, `subtitle`, or `asr` |
+
 ## ⚙️ Configuration
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `output_image` | `true` | Send summary as image |
+| `asr_provider` | `bcut` | Use the public Bcut API or `local_multimodal_infra` when subtitles are unavailable |
+| `local_multimodal_infra_base_url` | `http://127.0.0.1:17890` | local-multimodal-infra Controller URL |
+| `local_multimodal_infra_token` | empty | Optional inference Bearer token |
+| `local_multimodal_infra_model` | `sensevoice-small-onnx` | Local ASR model ID |
 | `mobile_output` | `false` | Mobile-optimized output (larger font, compact layout) |
 | `note_style` | `professional` | Style: `concise` / `detailed` / `professional` |
 | `enable_auto_push` | `false` | Enable automatic new video push |
@@ -303,6 +335,7 @@ Scan the QR code with the Bilibili mobile app.
 - Requires an LLM Provider configured in AstrBot
 - Summary generation takes ~1-3 minutes per video
 - Falls back to plain text if image rendering fails
+- `bcut` uploads audio to a public service; select `local_multimodal_infra` to keep ASR in your own environment
 
 ## 🔎 Credits
 
