@@ -5,7 +5,7 @@
 
   <br/>
 
-  <img src="https://img.shields.io/badge/version-v1.1.0-blue" />
+  <img src="https://img.shields.io/badge/version-v1.1.1-blue" />
   <img src="https://img.shields.io/badge/AstrBot-v4.0+-green" />
   <img src="https://img.shields.io/badge/platform-Bilibili-ff69b4" />
   <img src="https://img.shields.io/badge/license-MIT-orange" />
@@ -133,6 +133,8 @@ apt install -y ffmpeg
 | `bilibili_get_video_content` | 提取带时间戳的视频内容；`auto` 优先字幕，`subtitle` 只取字幕，`asr` 强制转写 |
 
 内容工具默认最多返回 20000 字符，Agent 可通过 `max_chars` 在 1000-50000 之间调整。它与总结命令共用访问控制和 B站登录 Cookie。
+
+当消息通过 `@机器人` 或唤醒关键词触发 LLM，同时又包含 BV 号或 B站链接时，插件会旁路发送视频状态，并继续保留原消息的 AI 对话；开启自动总结时，总结也会在后台并行生成。
 
 ### 使用示例
 
@@ -300,6 +302,8 @@ Scan the QR code with the Bilibili mobile app.
 | `bilibili_search_videos` | Search videos by keyword with configurable ordering |
 | `bilibili_get_video_info` | Read metadata, uploader, duration, pages, and statistics |
 | `bilibili_get_video_content` | Extract timestamped subtitles or ASR output using `auto`, `subtitle`, or `asr` |
+
+If an `@bot` mention or wake keyword and a Bilibili link occur in the same message, video status is sent as a side response while the normal AI conversation continues.
 
 ## ⚙️ Configuration
 

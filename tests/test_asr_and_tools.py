@@ -3,9 +3,12 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import astrbot_plugin_biliVideo.main as main_module
+from astrbot.core.pipeline.process_stage.stage import ProcessStage
 from astrbot_plugin_biliVideo.main import BiliVideoPlugin
 from astrbot_plugin_biliVideo.models.audio_model import AudioDownloadResult
 from astrbot_plugin_biliVideo.models.transcriber_model import (
@@ -82,6 +85,55 @@ class FakeSession:
                 }
             )
         return FakeResponse({"ok": True})
+
+
+class AutoDetectEvent:
+    def __init__(self, wake: bool):
+        self.message_str = "@bot 看看 BV1xx411c7mD 并告诉我你的看法"
+        self.message_obj = None
+        self.is_at_or_wake_command = wake
+        self._extras = {}
+        self.sent = []
+        self._has_send_oper = False
+        self.call_llm = False
+
+    def chain_result(self, chain):
+        return ("chain_result", chain)
+
+    def get_extra(self, key, default=None):
+        return self._extras.get(key, default)
+
+    def set_extra(self, key, value):
+        self._extras[key] = value
+
+    def get_result(self):
+        return None
+
+    async def send(self, chain):
+        self.sent.append(chain)
+        self._has_send_oper = True
+
+
+def make_auto_detect_plugin(auto_summary: bool = False):
+    plugin = BiliVideoPlugin.__new__(BiliVideoPlugin)
+    plugin.enable_miniapp_detect = True
+    plugin.bili_cookies = {}
+    plugin.config = {
+        "detect_show_cover": False,
+        "detect_auto_summary": auto_summary,
+        "summary_progress_template": "正在总结",
+    }
+    plugin._side_tasks = set()
+    plugin._check_detect_access = lambda _event: True
+    plugin._log = lambda _message: None
+    plugin._log_always = lambda _message: None
+    plugin._format_video_info = lambda _info, bvid: f"视频状态 {bvid}"
+
+    async def no_history(_event, _bvid):
+        return {"summary": None, "video_info": None}
+
+    plugin._find_bvid_history = no_history
+    return plugin
 
 
 def test_local_multimodal_infra_uses_upload_task_flow(tmp_path: Path):
@@ -256,3 +308,115 @@ def test_asr_configuration_schema_is_valid():
         "bcut",
         "local_multimodal_infra",
     ]
+
+
+@pytest.mark.asyncio
+async def test_wake_message_queues_video_status_without_consuming_llm(
+    monkeypatch,
+):
+    async def video_info(_bvid, cookies=None):
+        return {"title": "测试视频", "pic": ""}
+
+    monkeypatch.setattr(main_module, "get_video_info", video_info)
+    plugin = make_auto_detect_plugin()
+    queued = []
+    plugin._queue_llm_side_message = lambda _event, chain: queued.append(chain)
+    event = AutoDetectEvent(wake=True)
+
+    yielded = [item async for item in plugin.on_all_message(event)]
+
+    assert yielded == []
+    assert len(queued) == 1
+    assert queued[0][0].text == "视频状态 BV1xx411c7mD"
+
+
+@pytest.mark.asyncio
+async def test_plain_bv_message_keeps_normal_auto_detect_response(monkeypatch):
+    async def video_info(_bvid, cookies=None):
+        return {"title": "测试视频", "pic": ""}
+
+    monkeypatch.setattr(main_module, "get_video_info", video_info)
+    plugin = make_auto_detect_plugin()
+    event = AutoDetectEvent(wake=False)
+
+    yielded = [item async for item in plugin.on_all_message(event)]
+
+    assert len(yielded) == 1
+    assert yielded[0][0] == "chain_result"
+
+
+@pytest.mark.asyncio
+async def test_wake_auto_summary_runs_as_side_task(monkeypatch):
+    async def video_info(_bvid, cookies=None):
+        return {"title": "测试视频", "pic": ""}
+
+    monkeypatch.setattr(main_module, "get_video_info", video_info)
+    plugin = make_auto_detect_plugin(auto_summary=True)
+    queued = []
+    tracked = []
+    plugin._queue_llm_side_message = lambda _event, chain: queued.append(chain)
+
+    def track(coroutine, name):
+        coroutine.close()
+        tracked.append(name)
+
+    plugin._track_side_task = track
+    event = AutoDetectEvent(wake=True)
+
+    yielded = [item async for item in plugin.on_all_message(event)]
+
+    assert yielded == []
+    assert len(queued) == 2
+    assert tracked == ["bilivideo-auto-summary-BV1xx411c7mD"]
+
+
+@pytest.mark.asyncio
+async def test_llm_hook_flushes_side_message_once():
+    plugin = make_auto_detect_plugin()
+    event = AutoDetectEvent(wake=True)
+    plugin._queue_llm_side_message(event, [main_module.Plain("视频状态")])
+
+    assert event._has_send_oper is False
+    await plugin.flush_bilibili_status_before_llm(event, None)
+    await asyncio.sleep(0.06)
+
+    assert len(event.sent) == 1
+    assert event._has_send_oper is True
+    assert event.sent[0].chain[0].text == "视频状态"
+
+
+@pytest.mark.asyncio
+async def test_process_stage_calls_llm_while_side_status_is_sent():
+    plugin = make_auto_detect_plugin()
+    event = AutoDetectEvent(wake=True)
+    event.set_extra("activated_handlers", [object()])
+    plugin._queue_llm_side_message(event, [main_module.Plain("视频状态")])
+
+    class EmptyStarStage:
+        async def process(self, _event):
+            if False:
+                yield
+
+    class RecordingAgentStage:
+        def __init__(self):
+            self.called = False
+
+        async def process(self, _event):
+            self.called = True
+            await asyncio.sleep(0.06)
+            yield
+
+    agent_stage = RecordingAgentStage()
+    stage = ProcessStage.__new__(ProcessStage)
+    stage.ctx = SimpleNamespace(
+        astrbot_config={"provider_settings": {"enable": True}}
+    )
+    stage.star_request_sub_stage = EmptyStarStage()
+    stage.agent_sub_stage = agent_stage
+
+    async for _ in stage.process(event):
+        pass
+
+    assert agent_stage.called is True
+    assert len(event.sent) == 1
+    assert event.sent[0].chain[0].text == "视频状态"

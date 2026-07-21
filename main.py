@@ -15,6 +15,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.message_components import Plain, Image, Reply
 from astrbot.api import llm_tool, logger
+from astrbot.api.provider import ProviderRequest
 
 from .services.subscription import SubscriptionManager
 from .services.bilibili_api import (
@@ -112,6 +113,7 @@ class BiliVideoPlugin(Star):
 
         # 定时任务
         self._check_task = None
+        self._side_tasks: set[asyncio.Task] = set()
         self._running = False
 
         # 启动定时检查
@@ -574,6 +576,92 @@ class BiliVideoPlugin(Star):
 
     # ==================== B站链接自动识别 ====================
 
+    _LLM_SIDE_MESSAGES_KEY = "bilivideo_llm_side_messages"
+    _LLM_SIDE_FLUSH_TASK_KEY = "bilivideo_llm_side_flush_task"
+
+    def _track_side_task(self, coroutine, name: str) -> asyncio.Task:
+        """跟踪旁路任务，确保卸载插件时能够清理。"""
+        task = asyncio.create_task(coroutine, name=name)
+        self._side_tasks.add(task)
+
+        def on_done(done_task: asyncio.Task):
+            self._side_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            try:
+                error = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if error:
+                logger.error(f"[BiliVideo] 旁路任务 {name} 失败: {error}")
+
+        task.add_done_callback(on_done)
+        return task
+
+    def _queue_llm_side_message(
+        self,
+        event: AstrMessageEvent,
+        chain: MessageChain | list,
+    ) -> None:
+        """排队旁路消息，不让视频状态结果占用默认 LLM 回复槽。"""
+        message = chain if isinstance(chain, MessageChain) else MessageChain(chain=chain)
+        pending = event.get_extra(self._LLM_SIDE_MESSAGES_KEY, [])
+        if not isinstance(pending, list):
+            pending = []
+        pending.append(message)
+        event.set_extra(self._LLM_SIDE_MESSAGES_KEY, pending)
+
+        existing = event.get_extra(self._LLM_SIDE_FLUSH_TASK_KEY)
+        if existing and not existing.done():
+            return
+        task = self._track_side_task(
+            self._flush_llm_side_messages_later(event),
+            "bilivideo-llm-side-flush",
+        )
+        event.set_extra(self._LLM_SIDE_FLUSH_TASK_KEY, task)
+
+    async def _flush_llm_side_messages(self, event: AstrMessageEvent) -> None:
+        pending = event.get_extra(self._LLM_SIDE_MESSAGES_KEY, [])
+        event.set_extra(self._LLM_SIDE_MESSAGES_KEY, [])
+        if not isinstance(pending, list):
+            return
+        for chain in pending:
+            await event.send(chain)
+
+    async def _flush_llm_side_messages_later(
+        self,
+        event: AstrMessageEvent,
+    ) -> None:
+        """无可用 LLM 时也保证旁路消息最终会发出。"""
+        await asyncio.sleep(0.05)
+        await self._flush_llm_side_messages(event)
+
+    @filter.on_llm_request()
+    async def flush_bilibili_status_before_llm(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> None:
+        """LLM 已进入请求链后发送视频状态，不再影响默认 LLM 决策。"""
+        del req
+        await self._flush_llm_side_messages(event)
+
+    async def _run_auto_summary_side_response(
+        self,
+        event: AstrMessageEvent,
+        video_url: str,
+        bvid: str,
+    ) -> None:
+        try:
+            note = await self._generate_note(video_url)
+            result = await self._render_and_get_chain(note, bvid=bvid)
+            await event.send(MessageChain(chain=result))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._log(f"[AutoDetect] 自动总结失败: {error}")
+            await event.send(MessageChain(chain=[Plain(f"❌ 自动总结失败: {error}")]))
+
     @filter.command("识别开关", alias={"detect_toggle", "切换识别"})
     async def toggle_detect_cmd(self, event: AstrMessageEvent):
         """实时切换B站链接自动识别开关"""
@@ -714,6 +802,7 @@ class BiliVideoPlugin(Star):
             return
 
         self._log_always(f"[AutoDetect] 检测到 BV 号: {bvid}")
+        allow_default_llm = bool(event.is_at_or_wake_command)
         
         try:
             history = await self._find_bvid_history(event, bvid)
@@ -746,13 +835,27 @@ class BiliVideoPlugin(Star):
                                 pic_url = "https:" + pic_url
                             chain.append(Image.fromURL(pic_url))
                     chain.append(Plain(self._format_video_info(info, bvid)))
-                    yield event.chain_result(chain)
+                    if allow_default_llm:
+                        self._queue_llm_side_message(event, chain)
+                    else:
+                        yield event.chain_result(chain)
                 except Exception as e:
                     self._log(f"[AutoDetect] 推送视频信息失败: {e}")
 
             if need_summary:
                 self._log_always(f"[AutoDetect] 生成总结: {video_url}")
                 progress_msg = self.config.get("summary_progress_template", "⏳ 正在生成总结，请稍候（可能需要1-3分钟）...")
+                if allow_default_llm:
+                    self._queue_llm_side_message(event, [Plain(progress_msg)])
+                    self._track_side_task(
+                        self._run_auto_summary_side_response(
+                            event,
+                            video_url,
+                            bvid,
+                        ),
+                        f"bilivideo-auto-summary-{bvid}",
+                    )
+                    return
                 yield event.plain_result(progress_msg)
                 try:
                     note = await self._generate_note(video_url)
@@ -1935,6 +2038,12 @@ class BiliVideoPlugin(Star):
                 await self._check_task
             except asyncio.CancelledError:
                 pass
+
+        side_tasks = list(self._side_tasks)
+        for task in side_tasks:
+            task.cancel()
+        if side_tasks:
+            await asyncio.gather(*side_tasks, return_exceptions=True)
 
         await close_browser()
 
