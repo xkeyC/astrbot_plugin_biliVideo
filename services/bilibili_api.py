@@ -1,3 +1,4 @@
+import json
 import re
 import uuid
 from typing import Optional, List, Dict
@@ -325,6 +326,7 @@ async def get_video_info(bvid: str, cookies: Optional[dict] = None) -> Optional[
                 stat = d.get("stat") or {}
                 return {
                     "bvid": d.get("bvid", bvid),
+                    "aid": d.get("aid", 0),
                     "title": d.get("title", ""),
                     "pic": d.get("pic", ""),
                     "desc": d.get("desc", ""),
@@ -337,12 +339,118 @@ async def get_video_info(bvid: str, cookies: Optional[dict] = None) -> Optional[
                     "coin": stat.get("coin", 0),
                     "favorite": stat.get("favorite", 0),
                     "share": stat.get("share", 0),
+                    "reply": stat.get("reply", 0),
                     "duration": d.get("duration", 0),
                     "pages": d.get("pages") or [],
                 }
     except Exception as e:
         logger.error(f"获取视频信息异常: {e}")
         return None
+
+
+def _format_comment(reply: dict, max_sub_replies: int = 0) -> Dict:
+    member = reply.get("member") or {}
+    content = reply.get("content") or {}
+    item = {
+        "rpid": str(reply.get("rpid") or ""),
+        "user": member.get("uname", ""),
+        "mid": str(reply.get("mid") or member.get("mid") or ""),
+        "message": content.get("message", ""),
+        "like": reply.get("like", 0),
+        "reply_count": reply.get("rcount", 0),
+        "ctime": reply.get("ctime", 0),
+    }
+    location = (reply.get("reply_control") or {}).get("location")
+    if location:
+        item["location"] = location
+    if max_sub_replies > 0:
+        sub_replies = [
+            _format_comment(sub)
+            for sub in (reply.get("replies") or [])[:max_sub_replies]
+        ]
+        if sub_replies:
+            item["replies"] = sub_replies
+    return item
+
+
+async def get_video_comments(
+    aid: int,
+    limit: int = 10,
+    sort: str = "hot",
+    offset: str = "",
+    cookies: Optional[dict] = None,
+) -> Dict:
+    """
+    获取视频评论区（主楼 + 少量楼中楼）
+
+    :param aid: 视频 av 号（oid）
+    :param limit: 返回的主楼评论数量，1-20
+    :param sort: hot(按热度) / time(按时间)
+    :param offset: 翻页游标，取上一次返回的 next_offset
+    :return: {"sort", "total", "comments", "next_offset", "is_end"}
+    """
+    limit = min(20, max(1, int(limit)))
+    mode = 2 if sort == "time" else 3
+    params = {
+        "oid": int(aid),
+        "type": 1,
+        "mode": mode,
+        "pagination_str": json.dumps({"offset": offset or ""}, separators=(",", ":")),
+        "plat": 1,
+        "web_location": 1315875,
+    }
+    if not offset:
+        params["seek_rpid"] = ""
+    signed_params = await sign_wbi_params(params, cookies=cookies)
+    url = "https://api.bilibili.com/x/v2/reply/wbi/main"
+
+    try:
+        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
+            async with session.get(
+                url,
+                params=signed_params,
+                headers=_build_headers(cookies),
+            ) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                payload = await resp.json(content_type=None)
+                if payload.get("code") != 0:
+                    raise RuntimeError(
+                        f"code={payload.get('code')}, msg={payload.get('message')}"
+                    )
+    except Exception as e:
+        logger.error(f"获取视频评论异常: {e}")
+        raise RuntimeError(f"获取视频评论失败: {e}") from e
+
+    data = payload.get("data") or {}
+    cursor = data.get("cursor") or {}
+    comments = []
+    seen = set()
+    # 置顶评论只在第一页返回
+    if not offset:
+        top = (data.get("upper") or {}).get("top")
+        for reply in [top, *(data.get("top_replies") or [])]:
+            if reply and reply.get("rpid") not in seen:
+                seen.add(reply.get("rpid"))
+                comments.append({**_format_comment(reply, 3), "pinned": True})
+    for reply in data.get("replies") or []:
+        if len(comments) >= limit:
+            break
+        if reply.get("rpid") in seen:
+            continue
+        seen.add(reply.get("rpid"))
+        comments.append(_format_comment(reply, 3))
+
+    next_offset = (
+        (cursor.get("pagination_reply") or {}).get("next_offset") or ""
+    )
+    return {
+        "sort": "time" if mode == 2 else "hot",
+        "total": cursor.get("all_count", 0),
+        "comments": comments[:limit],
+        "next_offset": next_offset,
+        "is_end": bool(cursor.get("is_end")),
+    }
 
 
 async def resolve_short_url(short_url: str) -> Optional[str]:

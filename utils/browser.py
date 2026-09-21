@@ -59,6 +59,14 @@ async def close_browser():
         _playwright_instance = None
 
 
+async def _block_network_request(route) -> None:
+    """只放行内联 data: 资源，其余请求一律中止。"""
+    if route.request.url.startswith(("data:", "about:")):
+        await route.continue_()
+    else:
+        await route.abort()
+
+
 async def create_page(
     width: int = 1400,
     height: int = 10000,
@@ -75,7 +83,10 @@ async def create_page(
             device_scale_factor=scale_factor,
             is_mobile=is_mobile,
             has_touch=is_mobile,
+            # 总结内容来自 LLM：禁用页面脚本，并拦截所有网络请求（字体/图标均为 data URI）
+            java_script_enabled=False,
         )
+        await context.route("**/*", _block_network_request)
         page = await context.new_page()
         return page
     except Exception as e:

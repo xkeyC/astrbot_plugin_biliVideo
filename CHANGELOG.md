@@ -1,5 +1,22 @@
 # 更新日志
 
+## v1.2.0 (2026-09-21)
+
+### 新增
+
+- 总结图片支持 LaTeX 公式渲染（`$...$`、`$$...$$`、`\(...\)`、`\[...\]`），使用本地 latex2mathml 转 MathML，不依赖 CDN（移植自 markdown_killer 渲染器）
+- `bilibili_get_video_info` 工具新增 `include_comments`、`comment_limit`、`comment_sort`、`comment_offset` 参数，可拉取评论区（热门/最新、置顶标记、楼中楼、IP 属地、翻页游标）
+- 总结提示词明确公式定界符写法
+
+### 安全
+
+- 公式 MathML 经 XML 解析后按白名单重新序列化，防止 `\text{<img onerror=...>}` 之类注入
+- 截图浏览器上下文禁用 JavaScript，并拦截所有非 `data:` 网络请求
+
+### 依赖
+
+- 新增 `latex2mathml`
+
 ## v1.1.1 (2026-07-21)
 
 ### 修复

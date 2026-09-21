@@ -21,6 +21,7 @@ from .services.subscription import SubscriptionManager
 from .services.bilibili_api import (
     get_latest_videos,
     get_up_info,
+    get_video_comments,
     get_video_info,
     resolve_short_url,
     search_up_by_name,
@@ -270,14 +271,22 @@ class BiliVideoPlugin(Star):
         self,
         event: AstrMessageEvent,
         video: str,
+        include_comments: bool = False,
+        comment_limit: int = 10,
+        comment_sort: str = "hot",
+        comment_offset: str = "",
     ) -> str:
-        """获取 B站视频详情。适合在提取内容前核对标题、UP主、简介、时长和播放数据。
+        """获取 B站视频详情，可选拉取评论区。适合在提取内容前核对标题、UP主、简介、时长和播放数据，或了解观众评价、评论区讨论。
 
         Args:
             video(string): BV 号、完整视频链接或 b23.tv 短链。
+            include_comments(boolean): 可选。是否同时拉取评论区，默认 false。用户询问评论、观众反馈、弹幕外的讨论时设为 true。
+            comment_limit(number): 可选。返回的主楼评论数量，范围 1-20，默认 10。每条主楼附带最多 3 条楼中楼。
+            comment_sort(string): 可选。评论排序：hot(按热度，默认，含置顶评论) 或 time(按时间最新)。
+            comment_offset(string): 可选。评论翻页游标，填上一次结果中的 comments.next_offset；首页留空。
 
         Returns:
-            str: JSON 格式的视频详情。
+            str: JSON 格式的视频详情；include_comments 为 true 时包含 comments 字段。
         """
         if not self._check_access(event):
             return json.dumps({"success": False, "error": "当前会话无权使用 B站工具"}, ensure_ascii=False)
@@ -287,7 +296,23 @@ class BiliVideoPlugin(Star):
             if not info:
                 raise RuntimeError(f"未找到视频 {bvid}")
             info["url"] = f"https://www.bilibili.com/video/{bvid}"
-            return json.dumps({"success": True, "video": info}, ensure_ascii=False)
+            result = {"success": True, "video": info}
+            if include_comments or comment_offset:
+                try:
+                    result["comments"] = await get_video_comments(
+                        info["aid"],
+                        limit=comment_limit,
+                        sort=comment_sort,
+                        offset=comment_offset,
+                        cookies=self.bili_cookies or None,
+                    )
+                    if not self.bili_cookies:
+                        result["comments"]["note"] = (
+                            "B站未登录，评论区仅返回前几条且无法翻页；管理员可发送 /B站登录 扫码获取完整评论"
+                        )
+                except Exception as e:
+                    result["comments_error"] = str(e)
+            return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[BiliVideo/Tool] 获取视频详情失败: {e}")
             return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)

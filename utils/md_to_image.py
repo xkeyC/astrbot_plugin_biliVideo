@@ -4,6 +4,8 @@ import os
 import re
 from typing import Optional
 
+from .formula import FORMULA_CSS, markdown_with_formulas
+
 logger = logging.getLogger(__name__)
 
 _ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
@@ -244,6 +246,7 @@ tr:nth-child(even) td{{background:rgba(148,163,184,.03)}}
 .ftxt{{font-size:11px;color:#64748b;letter-spacing:.8px;font-family:'JetBrains Mono',monospace}}
 .ftxt .br{{color:#94a3b8;font-weight:600}}
 .ftime{{font-size:11px;color:#4a5568;letter-spacing:.5px;font-family:'JetBrains Mono',monospace}}
+{FORMULA_CSS}
 </style></head>
 <body>
 <div class="header">
@@ -404,6 +407,7 @@ tr:nth-child(even) td{{background:rgba(148,163,184,.03)}}
 .ftxt{{font-size:12px;color:#64748b;letter-spacing:.5px;font-family:'JetBrains Mono',monospace}}
 .ftxt .br{{color:#94a3b8;font-weight:600}}
 .ftime{{font-size:12px;color:#4a5568;letter-spacing:.3px;font-family:'JetBrains Mono',monospace}}
+{FORMULA_CSS}
 </style></head>
 <body>
 <div class="header">
@@ -471,9 +475,12 @@ async def render_note_image_async(
         from datetime import datetime
         render_start = _time.time()
 
-        html_body = md.markdown(
+        html_body = markdown_with_formulas(
             markdown_text,
-            extensions=['tables', 'fenced_code', 'nl2br'],
+            lambda text: md.markdown(
+                text,
+                extensions=['tables', 'fenced_code', 'nl2br'],
+            ),
         )
         html_body = _highlight_timestamps(html_body)
 

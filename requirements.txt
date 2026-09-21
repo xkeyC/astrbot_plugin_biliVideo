@@ -4,3 +4,4 @@ requests
 markdown
 playwright
 segno
+latex2mathml

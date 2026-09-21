@@ -129,7 +129,7 @@ apt install -y ffmpeg
 | 工具 | 说明 |
 |------|------|
 | `bilibili_search_videos` | 按关键词搜索视频，支持综合、播放、最新、弹幕和收藏排序 |
-| `bilibili_get_video_info` | 获取标题、UP主、简介、时长、分P和播放互动数据 |
+| `bilibili_get_video_info` | 获取标题、UP主、简介、时长、分P和播放互动数据；`include_comments=true` 时附带评论区（热门/最新，支持翻页，未登录时 B站仅返回前几条） |
 | `bilibili_get_video_content` | 提取带时间戳的视频内容；`auto` 优先字幕，`subtitle` 只取字幕，`asr` 强制转写 |
 
 内容工具默认最多返回 20000 字符，Agent 可通过 `max_chars` 在 1000-50000 之间调整。它与总结命令共用访问控制和 B站登录 Cookie。
@@ -300,7 +300,7 @@ Scan the QR code with the Bilibili mobile app.
 | Tool | Description |
 |------|-------------|
 | `bilibili_search_videos` | Search videos by keyword with configurable ordering |
-| `bilibili_get_video_info` | Read metadata, uploader, duration, pages, and statistics |
+| `bilibili_get_video_info` | Read metadata, uploader, duration, pages, and statistics; set `include_comments=true` to also fetch comments (hot/latest, paginated; guests only get the first few) |
 | `bilibili_get_video_content` | Extract timestamped subtitles or ASR output using `auto`, `subtitle`, or `asr` |
 
 If an `@bot` mention or wake keyword and a Bilibili link occur in the same message, video status is sent as a side response while the normal AI conversation continues.
