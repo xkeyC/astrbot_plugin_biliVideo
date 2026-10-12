@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import uuid
@@ -18,6 +19,49 @@ BILIBILI_API_HEADERS = {
 
 def _strip_search_highlight(text: str) -> str:
     return re.sub(r"</?em(?:\s+class=\"keyword\")?>", "", text or "")
+
+
+class BiliApiError(RuntimeError):
+    """B站接口返回非 0 code"""
+
+    def __init__(self, code, message: str = ""):
+        self.code = code
+        hint = _ERROR_HINTS.get(str(code), "")
+        super().__init__(f"code={code}, msg={message}{hint}")
+
+
+_ERROR_HINTS = {
+    "-101": "（需要登录，管理员可发送 /B站登录 扫码）",
+    "-352": "（触发 B站风控，登录后通常可恢复，管理员可发送 /B站登录 扫码）",
+    "-412": "（请求被 B站拦截，请稍后重试）",
+    "-404": "（内容不存在或已删除）",
+}
+
+
+async def request_json(
+    url: str,
+    params: Optional[dict] = None,
+    cookies: Optional[dict] = None,
+    wbi: bool = False,
+) -> dict:
+    """GET B站接口并校验 code，返回完整响应体。"""
+    params = dict(params or {})
+    if wbi:
+        params = await sign_wbi_params(params, cookies=cookies)
+    try:
+        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
+            async with session.get(url, params=params, headers=_build_headers(cookies)) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                payload = await resp.json(content_type=None)
+    except asyncio.TimeoutError as e:
+        raise RuntimeError(f"请求 B站接口超时: {url}") from e
+    except aiohttp.ClientError as e:
+        raise RuntimeError(f"请求 B站接口失败: {e or type(e).__name__}") from e
+    code = payload.get("code")
+    if code not in (0, "0"):
+        raise BiliApiError(code, payload.get("message") or payload.get("msg") or "")
+    return payload
 
 
 def _build_headers(cookies: Optional[dict] = None) -> dict:
@@ -228,75 +272,6 @@ async def _search_up_fallback(keyword: str, cookies: Optional[dict] = None) -> O
         return None
 
 
-async def search_videos(
-    keyword: str,
-    page: int = 1,
-    count: int = 10,
-    order: str = "totalrank",
-    cookies: Optional[dict] = None,
-) -> List[Dict]:
-    """按关键词搜索 B站视频。"""
-    allowed_orders = {"totalrank", "click", "pubdate", "dm", "stow"}
-    if order not in allowed_orders:
-        order = "totalrank"
-    page = max(1, int(page))
-    count = min(20, max(1, int(count)))
-    params = {
-        "search_type": "video",
-        "keyword": keyword.strip(),
-        "page": page,
-        "order": order,
-        "duration": 0,
-        "tids": 0,
-    }
-    signed_params = await sign_wbi_params(params, cookies=cookies)
-    url = "https://api.bilibili.com/x/web-interface/wbi/search/type"
-
-    try:
-        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
-            async with session.get(
-                url,
-                params=signed_params,
-                headers=_build_headers(cookies),
-            ) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"HTTP {resp.status}")
-                payload = await resp.json()
-                if payload.get("code") != 0:
-                    raise RuntimeError(
-                        f"code={payload.get('code')}, msg={payload.get('message')}"
-                    )
-
-        results = (payload.get("data") or {}).get("result") or []
-        videos = []
-        for item in results[:count]:
-            bvid = item.get("bvid") or ""
-            if not bvid:
-                continue
-            videos.append(
-                {
-                    "bvid": bvid,
-                    "title": _strip_search_highlight(item.get("title") or ""),
-                    "description": _strip_search_highlight(
-                        item.get("description") or ""
-                    ),
-                    "author": item.get("author") or "",
-                    "mid": str(item.get("mid") or ""),
-                    "duration": item.get("duration") or "",
-                    "play": item.get("play") or 0,
-                    "danmaku": item.get("video_review") or 0,
-                    "favorites": item.get("favorites") or 0,
-                    "pubdate": item.get("pubdate") or 0,
-                    "pic": item.get("pic") or "",
-                    "url": f"https://www.bilibili.com/video/{bvid}",
-                }
-            )
-        return videos
-    except Exception as e:
-        logger.error(f"搜索B站视频异常: {e}")
-        raise RuntimeError(f"搜索B站视频失败: {e}") from e
-
-
 async def get_video_info(bvid: str, cookies: Optional[dict] = None) -> Optional[Dict]:
     """
     获取视频详情信息
@@ -380,11 +355,26 @@ async def get_video_comments(
     offset: str = "",
     cookies: Optional[dict] = None,
 ) -> Dict:
-    """
-    获取视频评论区（主楼 + 少量楼中楼）
+    """获取视频评论区，oid 为视频 av 号。"""
+    return await get_comments(
+        aid, 1, limit=limit, sort=sort, offset=offset, cookies=cookies
+    )
 
-    :param aid: 视频 av 号（oid）
-    :param limit: 返回的主楼评论数量，1-20
+
+async def get_comments(
+    oid: int,
+    comment_type: int = 1,
+    limit: int = 10,
+    sort: str = "hot",
+    offset: str = "",
+    cookies: Optional[dict] = None,
+) -> Dict:
+    """
+    获取评论区（主楼 + 少量楼中楼）
+
+    :param oid: 评论区 id（视频/番剧分集为 av 号，专栏为 cv 号，音频为 au 号，动态为动态 id）
+    :param comment_type: 评论区类型代码：1 视频、12 专栏、14 音频、11 图片动态、17 文字动态
+    :param limit: 每页主楼评论数量，1-20（首页的置顶评论额外附加）
     :param sort: hot(按热度) / time(按时间)
     :param offset: 翻页游标，取上一次返回的 next_offset
     :return: {"sort", "total", "comments", "next_offset", "is_end"}
@@ -392,9 +382,11 @@ async def get_video_comments(
     limit = min(20, max(1, int(limit)))
     mode = 2 if sort == "time" else 3
     params = {
-        "oid": int(aid),
-        "type": 1,
+        "oid": int(oid),
+        "type": int(comment_type),
         "mode": mode,
+        # 每页条数与 limit 一致，否则截断后游标会跳过本页剩余评论
+        "ps": limit,
         "pagination_str": json.dumps({"offset": offset or ""}, separators=(",", ":")),
         "plat": 1,
         "web_location": 1315875,
@@ -419,8 +411,8 @@ async def get_video_comments(
                         f"code={payload.get('code')}, msg={payload.get('message')}"
                     )
     except Exception as e:
-        logger.error(f"获取视频评论异常: {e}")
-        raise RuntimeError(f"获取视频评论失败: {e}") from e
+        logger.error(f"获取评论异常: {e}")
+        raise RuntimeError(f"获取评论失败: {e}") from e
 
     data = payload.get("data") or {}
     cursor = data.get("cursor") or {}
@@ -434,8 +426,6 @@ async def get_video_comments(
                 seen.add(reply.get("rpid"))
                 comments.append({**_format_comment(reply, 3), "pinned": True})
     for reply in data.get("replies") or []:
-        if len(comments) >= limit:
-            break
         if reply.get("rpid") in seen:
             continue
         seen.add(reply.get("rpid"))
@@ -447,7 +437,7 @@ async def get_video_comments(
     return {
         "sort": "time" if mode == 2 else "hot",
         "total": cursor.get("all_count", 0),
-        "comments": comments[:limit],
+        "comments": comments,
         "next_offset": next_offset,
         "is_end": bool(cursor.get("is_end")),
     }

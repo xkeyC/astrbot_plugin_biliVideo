@@ -583,8 +583,10 @@ async def test_get_video_comments_parses_pinned_and_sub_replies(monkeypatch):
 
     result = await bilibili_api.get_video_comments(42, limit=2)
     assert captured["params"]["oid"] == 42 and captured["params"]["mode"] == 3
+    # 每页条数交给 B站，整页保留，避免游标跳过被截断的评论
+    assert captured["params"]["ps"] == 2
     assert result["total"] == 9 and result["next_offset"] == "next"
-    assert [c["message"] for c in result["comments"]] == ["置顶", "热评"]
+    assert [c["message"] for c in result["comments"]] == ["置顶", "热评", "第三"]
     assert result["comments"][0]["pinned"] is True
     assert len(result["comments"][1]["replies"]) == 3
     assert result["comments"][1]["location"] == "IP属地：上海"

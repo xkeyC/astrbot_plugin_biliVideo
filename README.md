@@ -5,7 +5,7 @@
 
   <br/>
 
-  <img src="https://img.shields.io/badge/version-v1.2.0-blue" />
+  <img src="https://img.shields.io/badge/version-v1.3.0-blue" />
   <img src="https://img.shields.io/badge/AstrBot-v4.0+-green" />
   <img src="https://img.shields.io/badge/platform-Bilibili-ff69b4" />
   <img src="https://img.shields.io/badge/license-MIT-orange" />
@@ -128,11 +128,17 @@ apt install -y ffmpeg
 
 | 工具 | 说明 |
 |------|------|
-| `bilibili_search_videos` | 按关键词搜索视频，支持综合、播放、最新、弹幕和收藏排序 |
+| `bilibili_search` | 分类搜索：`video` 视频、`user` 用户/UP主、`live`/`live_room`/`live_user` 直播、`bangumi` 番剧、`movie` 影视、`article` 专栏、`music` 音乐区视频，各类型支持对应的排序方式 |
 | `bilibili_get_video_info` | 获取标题、UP主、简介、时长、分P和播放互动数据；`include_comments=true` 时附带评论区（热门/最新，支持翻页，未登录时 B站仅返回前几条） |
 | `bilibili_get_video_content` | 提取带时间戳的视频内容；`auto` 优先字幕，`subtitle` 只取字幕，`asr` 强制转写 |
+| `bilibili_get_user_info` | 用户资料：昵称、签名、等级、粉丝、投稿数、认证、直播间，可附带最新投稿；支持 UID、空间链接或昵称 |
+| `bilibili_get_live_room` | 直播间信息：标题、开播状态与时间、分区、人气、关注数、简介和主播资料；支持房间号（含短号）、直播间链接、`UID:数字` |
+| `bilibili_get_bangumi_info` | 番剧/影视详情：简介、评分、播放数据、更新进度、声优与制作人员、分集列表（可翻页）、关联季度；支持 ss/ep/md 号或链接 |
+| `bilibili_get_article` | 专栏文章 / 图文动态的元信息与正文（图片以 `[图片]` 占位）；支持 cv 号、专栏链接、opus 和动态链接 |
+| `bilibili_get_music` | 音频（au 号）信息与带时间轴的歌词，并给出关联视频的 BV 号 |
+| `bilibili_get_comments` | 统一的评论区工具：视频、番剧分集、专栏、图文动态、音频均可，支持热门/最新排序和翻页 |
 
-内容工具默认最多返回 20000 字符，Agent 可通过 `max_chars` 在 1000-50000 之间调整。它与总结命令共用访问控制和 B站登录 Cookie。
+视频详情、内容和评论工具都接受 BV/av 号、视频链接、番剧分集 ep 号/链接和 b23.tv 短链，番剧与影视分集的字幕/转写同样通过 `bilibili_get_video_content` 获取（大会员专享分集需要登录账号有对应权益，否则只能拿到试看片段）。内容工具默认最多返回 20000 字符，Agent 可通过 `max_chars` 在 1000-50000 之间调整。所有工具与总结命令共用访问控制和 B站登录 Cookie；专栏正文、UP主投稿列表等接口未登录时容易被 B站风控拦截，建议先 `/B站登录`。
 
 当消息通过 `@机器人` 或唤醒关键词触发 LLM，同时又包含 BV 号或 B站链接时，插件会旁路发送视频状态，并继续保留原消息的 AI 对话；开启自动总结时，总结也会在后台并行生成。
 
@@ -211,6 +217,8 @@ apt install -y ffmpeg
 ## 🔎 致谢
 
 本插件的核心总结流程（音频下载、字幕获取、Prompt 构建）参考了 **[BiliNote](https://github.com/JefferyHcool/BiliNote)** (by JefferyHcool)。
+
+B站接口参考了 **[bili-apis](https://github.com/mikufilck/bili-apis)** 整理的 API 文档。
 
 ---
 
@@ -299,9 +307,17 @@ Scan the QR code with the Bilibili mobile app.
 
 | Tool | Description |
 |------|-------------|
-| `bilibili_search_videos` | Search videos by keyword with configurable ordering |
+| `bilibili_search` | Search by type: `video`, `user`, `live`/`live_room`/`live_user`, `bangumi`, `movie`, `article`, `music` (music-zone videos), with per-type ordering |
 | `bilibili_get_video_info` | Read metadata, uploader, duration, pages, and statistics; set `include_comments=true` to also fetch comments (hot/latest, paginated; guests only get the first few) |
 | `bilibili_get_video_content` | Extract timestamped subtitles or ASR output using `auto`, `subtitle`, or `asr` |
+| `bilibili_get_user_info` | User profile (name, bio, level, followers, uploads, verification, live room), optionally with latest uploads; accepts UID, space link, or nickname |
+| `bilibili_get_live_room` | Live room info (title, status, start time, area, popularity, followers, description, streamer); accepts room id (short ids too), room link, or `UID:<n>` |
+| `bilibili_get_bangumi_info` | Anime/movie/series details: synopsis, rating, stats, progress, cast and staff, paginated episode list, related seasons; accepts ss/ep/md ids or links |
+| `bilibili_get_article` | Article (cv) or image-text post (opus) metadata and body text |
+| `bilibili_get_music` | Audio track (au) info and timestamped lyrics, plus the linked video BV id |
+| `bilibili_get_comments` | Comments for videos, bangumi episodes, articles, posts, and audio tracks (hot/latest, paginated) |
+
+Video tools also accept av ids and bangumi episode (ep) ids/links, so episode subtitles/ASR go through `bilibili_get_video_content`. Article bodies and upload lists are often blocked by Bilibili risk control for guests; log in with `/B站登录` first.
 
 If an `@bot` mention or wake keyword and a Bilibili link occur in the same message, video status is sent as a side response while the normal AI conversation continues.
 
@@ -344,5 +360,7 @@ If an `@bot` mention or wake keyword and a Bilibili link occur in the same messa
 ## 🔎 Credits
 
 Core summarization flow (audio download, subtitle extraction, prompt building) is based on **[BiliNote](https://github.com/JefferyHcool/BiliNote)** by JefferyHcool.
+
+Bilibili API usage follows the documentation collected in **[bili-apis](https://github.com/mikufilck/bili-apis)**.
 
 ---

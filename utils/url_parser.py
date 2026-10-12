@@ -74,6 +74,36 @@ def extract_bilibili_mid(text: str) -> Optional[str]:
     return None
 
 
+# (类型, 正则)，按顺序匹配，第一个命中的生效
+_TARGET_PATTERNS = (
+    ("video", re.compile(r"(BV[0-9A-Za-z]{10})")),
+    ("episode", re.compile(r"(?<![A-Za-z])ep(\d+)", re.I)),
+    ("season", re.compile(r"(?<![A-Za-z])ss(\d+)", re.I)),
+    ("media", re.compile(r"(?<![A-Za-z])md(\d+)", re.I)),
+    ("article", re.compile(r"(?:(?<![A-Za-z])cv|/read/mobile/)(\d+)", re.I)),
+    ("audio", re.compile(r"(?<![A-Za-z])au(\d+)", re.I)),
+    ("opus", re.compile(r"(?:/opus/|t\.bilibili\.com/|/dynamic/)(\d+)", re.I)),
+    ("live", re.compile(r"live\.bilibili\.com/(?:h5/|blanc/)?(\d+)", re.I)),
+    ("user", re.compile(r"space\.bilibili\.com/(\d+)", re.I)),
+    ("video_aid", re.compile(r"(?<![A-Za-z])av(\d+)", re.I)),
+)
+
+
+def parse_bilibili_target(text: str) -> Optional[tuple]:
+    """
+    识别 B站资源 ID 或链接（短链需先解析）。
+
+    :return: (kind, id)，kind 为 video/video_aid/episode/season/media/
+             article/audio/opus/live/user 之一；无法识别时返回 None
+    """
+    value = (text or "").strip()
+    for kind, pattern in _TARGET_PATTERNS:
+        match = pattern.search(value)
+        if match:
+            return kind, match.group(1)
+    return None
+
+
 def resolve_bilibili_short_url(short_url: str) -> Optional[str]:
     """解析B站短链接"""
     try:

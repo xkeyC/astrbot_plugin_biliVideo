@@ -19,17 +19,35 @@ from astrbot.api.provider import ProviderRequest
 
 from .services.subscription import SubscriptionManager
 from .services.bilibili_api import (
+    get_comments,
     get_latest_videos,
     get_up_info,
     get_video_comments,
     get_video_info,
     resolve_short_url,
     search_up_by_name,
-    search_videos,
+)
+from .services.bilibili_resources import (
+    find_episode,
+    format_bangumi_season,
+    format_ts,
+    get_article,
+    get_audio,
+    get_bangumi_season,
+    get_bvid_by_aid,
+    get_live_room,
+    get_opus,
+    get_user_card,
+    get_user_live_room,
+    search_by_type,
 )
 from .services.bilibili_login import BilibiliLogin
 from .services.note_service import NoteService
-from .utils.url_parser import detect_platform, extract_bilibili_mid, extract_video_id
+from .utils.url_parser import (
+    detect_platform,
+    extract_bilibili_mid,
+    parse_bilibili_target,
+)
 from .utils.md_to_image import render_note_image_async
 from .utils.env_manager import EnvManager
 from .utils.browser import close_browser
@@ -170,15 +188,89 @@ class BiliVideoPlugin(Star):
             logger.error(f"Playwright 初始化失败: {e}")
             return False
 
+    _SHORT_LINK_HOSTS = ("b23.tv", "bili2233.cn", "bili22.cn", "bili23.cn", "bili33.cn")
+
+    async def _resolve_tool_target(self, value: str):
+        """识别 B站资源 ID/链接，短链先解析；返回 (kind, id) 或 None。"""
+        value = (value or "").strip()
+        if any(host in value.lower() for host in self._SHORT_LINK_HOSTS):
+            short = re.search(r"https?://\S+", value)
+            value = await resolve_short_url(short.group(0) if short else f"https://{value}") or value
+        return parse_bilibili_target(value)
+
+    async def _resolve_bangumi_episode(self, kind: str, value: str) -> dict:
+        """ep/ss 号解析为具体分集；多集剧集的 ss 号无法确定分集。"""
+        cookies = self.bili_cookies or None
+        if kind == "episode":
+            season = await get_bangumi_season(ep_id=int(value), cookies=cookies)
+            episode = find_episode(season, int(value))
+            if not episode:
+                raise RuntimeError(f"未找到分集 ep{value}")
+            return episode
+        season = await get_bangumi_season(season_id=int(value), cookies=cookies)
+        episodes = season.get("episodes") or []
+        if len(episodes) != 1:
+            raise ValueError(
+                f"ss{value} 共 {len(episodes)} 集，请提供具体分集 ep 号或链接"
+                "（可先调用 bilibili_get_bangumi_info 查看分集列表）"
+            )
+        return find_episode(season, episodes[0].get("ep_id") or episodes[0].get("id"))
+
     async def _resolve_tool_bvid(self, video: str) -> str:
-        """把 BV 号、长链接或 b23 短链统一为 BV 号。"""
-        value = (video or "").strip()
-        if "b23.tv" in value.lower():
-            value = await resolve_short_url(value) or value
-        bvid = extract_video_id(value, "bilibili")
-        if not bvid:
-            raise ValueError("请提供有效的 B站 BV 号、视频链接或 b23.tv 短链")
-        return bvid
+        """把 BV/av 号、视频链接、番剧分集 ep 链接或 b23 短链统一为 BV 号。"""
+        kind, value = await self._resolve_tool_target(video) or (None, None)
+        if kind == "video":
+            return value
+        if kind == "video_aid":
+            return await get_bvid_by_aid(int(value), cookies=self.bili_cookies or None)
+        if kind in ("episode", "season"):
+            episode = await self._resolve_bangumi_episode(kind, value)
+            if not episode.get("bvid"):
+                raise RuntimeError(f"分集 ep{episode.get('ep_id')} 没有对应的视频")
+            return episode["bvid"]
+        raise ValueError("请提供有效的 B站 BV/av 号、视频链接、番剧分集 ep 链接或 b23.tv 短链")
+
+    async def _resolve_tool_mid(self, user: str) -> str:
+        """UID、空间链接、UID:xxx 或昵称 → UID。"""
+        value = (user or "").strip()
+        if not value:
+            raise ValueError("user 不能为空")
+        match = re.fullmatch(r"(?i)(?:uid[:：]?\s*)?(\d+)", value)
+        if match:
+            return match.group(1)
+        target = await self._resolve_tool_target(value)
+        if target and target[0] == "user":
+            return target[1]
+        found = await search_up_by_name(value, cookies=self.bili_cookies or None)
+        if not found or not found.get("mid"):
+            raise RuntimeError(f"未找到用户: {value}")
+        return found["mid"]
+
+    @staticmethod
+    def _tool_json(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _tool_denied(self, event: AstrMessageEvent) -> str | None:
+        if self._check_access(event):
+            return None
+        return self._tool_json({"success": False, "error": "当前会话无权使用 B站工具"})
+
+    def _guest_comment_note(self, comments: dict) -> dict:
+        if not self.bili_cookies:
+            comments["note"] = (
+                "B站未登录，评论区仅返回前几条且无法翻页；管理员可发送 /B站登录 扫码获取完整评论"
+            )
+        return comments
+
+    @staticmethod
+    def _clip_text(text: str, max_chars: int, low: int = 1000, high: int = 50000) -> dict:
+        max_chars = min(high, max(low, int(max_chars)))
+        text = text or ""
+        return {
+            "content": text[:max_chars],
+            "text_length": len(text),
+            "truncated": len(text) > max_chars,
+        }
 
     @staticmethod
     def _transcript_tool_payload(transcript, max_chars: int) -> dict:
@@ -220,51 +312,45 @@ class BiliVideoPlugin(Star):
 
     # ==================== Agent 工具 ====================
 
-    @llm_tool("bilibili_search_videos")
-    async def bilibili_search_videos(
+    @llm_tool("bilibili_search")
+    async def bilibili_search(
         self,
         event: AstrMessageEvent,
         keyword: str,
+        search_type: str = "video",
         page: int = 1,
         limit: int = 10,
-        order: str = "totalrank",
+        order: str = "",
     ) -> str:
-        """搜索 B站视频。当用户想查找某个主题、关键词或 UP主相关视频时调用。
+        """按类型搜索 B站内容：视频、用户/UP主、直播、番剧、影视、专栏、音乐。找到目标后再用对应的详情工具读取。
 
         Args:
-            keyword(string): 视频搜索关键词。
-            page(number): 可选。结果页码，默认 1。
-            limit(number): 可选。返回数量，范围 1-20，默认 10。
-            order(string): 可选。排序方式：totalrank(综合)、click(播放)、pubdate(最新)、dm(弹幕)、stow(收藏)。
+            keyword(string): 搜索关键词。
+            search_type(string): 可选。搜索类型：video(视频，默认)、user(用户/UP主)、live(直播间+主播)、live_room(仅直播间)、live_user(仅主播)、bangumi(番剧)、movie(影视：电影/电视剧/纪录片/综艺)、article(专栏文章)、music(音乐区视频)。
+            page(number): 可选。结果页码，默认 1，每页最多 20 条。
+            limit(number): 可选。返回数量，范围 1-20，默认 10；live 类型对直播间和主播分别生效。
+            order(string): 可选。排序，留空为默认。video/music：totalrank(综合)、click(播放)、pubdate(最新)、dm(弹幕)、stow(收藏)、scores(评论)；article：totalrank、click、pubdate、attention(点赞)、scores；live/live_room：online(人气)、live_time(最新开播)；user：fans(粉丝数)、level(等级)。
 
         Returns:
-            str: JSON 格式的视频搜索结果。
+            str: JSON 格式的搜索结果。
         """
-        if not self._check_access(event):
-            return json.dumps({"success": False, "error": "当前会话无权使用 B站工具"}, ensure_ascii=False)
-        if not keyword.strip():
-            return json.dumps({"success": False, "error": "keyword 不能为空"}, ensure_ascii=False)
+        if denied := self._tool_denied(event):
+            return denied
         try:
-            videos = await search_videos(
+            result = await search_by_type(
                 keyword,
+                search_type=search_type,
                 page=page,
-                count=limit,
+                limit=limit,
                 order=order,
                 cookies=self.bili_cookies or None,
             )
-            return json.dumps(
-                {
-                    "success": True,
-                    "keyword": keyword,
-                    "page": max(1, int(page)),
-                    "count": len(videos),
-                    "videos": videos,
-                },
-                ensure_ascii=False,
+            return self._tool_json(
+                {"success": True, "keyword": keyword, "count": len(result["results"]), **result}
             )
         except Exception as e:
-            logger.error(f"[BiliVideo/Tool] 搜索视频失败: {e}")
-            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+            logger.error(f"[BiliVideo/Tool] 搜索失败: {e}")
+            return self._tool_json({"success": False, "error": str(e)})
 
     @llm_tool("bilibili_get_video_info")
     async def bilibili_get_video_info(
@@ -276,20 +362,20 @@ class BiliVideoPlugin(Star):
         comment_sort: str = "hot",
         comment_offset: str = "",
     ) -> str:
-        """获取 B站视频详情，可选拉取评论区。适合在提取内容前核对标题、UP主、简介、时长和播放数据，或了解观众评价、评论区讨论。
+        """获取 B站视频详情（也支持番剧/影视分集），可选拉取评论区。适合在提取内容前核对标题、UP主、简介、时长和播放数据，或了解观众评价、评论区讨论。
 
         Args:
-            video(string): BV 号、完整视频链接或 b23.tv 短链。
+            video(string): BV/av 号、完整视频链接、番剧分集 ep 号/链接或 b23.tv 短链。
             include_comments(boolean): 可选。是否同时拉取评论区，默认 false。用户询问评论、观众反馈、弹幕外的讨论时设为 true。
-            comment_limit(number): 可选。返回的主楼评论数量，范围 1-20，默认 10。每条主楼附带最多 3 条楼中楼。
+            comment_limit(number): 可选。每页主楼评论数量，范围 1-20，默认 10（首页置顶评论额外附加）。每条主楼附带最多 3 条楼中楼。
             comment_sort(string): 可选。评论排序：hot(按热度，默认，含置顶评论) 或 time(按时间最新)。
             comment_offset(string): 可选。评论翻页游标，填上一次结果中的 comments.next_offset；首页留空。
 
         Returns:
             str: JSON 格式的视频详情；include_comments 为 true 时包含 comments 字段。
         """
-        if not self._check_access(event):
-            return json.dumps({"success": False, "error": "当前会话无权使用 B站工具"}, ensure_ascii=False)
+        if denied := self._tool_denied(event):
+            return denied
         try:
             bvid = await self._resolve_tool_bvid(video)
             info = await get_video_info(bvid, cookies=self.bili_cookies or None)
@@ -299,23 +385,21 @@ class BiliVideoPlugin(Star):
             result = {"success": True, "video": info}
             if include_comments or comment_offset:
                 try:
-                    result["comments"] = await get_video_comments(
-                        info["aid"],
-                        limit=comment_limit,
-                        sort=comment_sort,
-                        offset=comment_offset,
-                        cookies=self.bili_cookies or None,
-                    )
-                    if not self.bili_cookies:
-                        result["comments"]["note"] = (
-                            "B站未登录，评论区仅返回前几条且无法翻页；管理员可发送 /B站登录 扫码获取完整评论"
+                    result["comments"] = self._guest_comment_note(
+                        await get_video_comments(
+                            info["aid"],
+                            limit=comment_limit,
+                            sort=comment_sort,
+                            offset=comment_offset,
+                            cookies=self.bili_cookies or None,
                         )
+                    )
                 except Exception as e:
                     result["comments_error"] = str(e)
-            return json.dumps(result, ensure_ascii=False)
+            return self._tool_json(result)
         except Exception as e:
             logger.error(f"[BiliVideo/Tool] 获取视频详情失败: {e}")
-            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+            return self._tool_json({"success": False, "error": str(e)})
 
     @llm_tool("bilibili_get_video_content")
     async def bilibili_get_video_content(
@@ -325,18 +409,18 @@ class BiliVideoPlugin(Star):
         source: str = "auto",
         max_chars: int = 20000,
     ) -> str:
-        """提取 B站视频的字幕或 ASR 转写，返回带时间戳的内容。先搜索再阅读视频时调用。
+        """提取 B站视频（含番剧/影视分集、音乐视频）的字幕或 ASR 转写，返回带时间戳的内容。先搜索再阅读视频时调用。
 
         Args:
-            video(string): BV 号、完整视频链接或 b23.tv 短链。
+            video(string): BV/av 号、完整视频链接、番剧分集 ep 号/链接或 b23.tv 短链。
             source(string): 可选。auto 优先平台字幕、无字幕时 ASR；subtitle 只取字幕；asr 强制使用配置的 ASR 提供商。
             max_chars(number): 可选。返回内容最大字符数，范围 1000-50000，默认 20000。
 
         Returns:
             str: JSON 格式的视频信息、内容来源和带时间戳文本。
         """
-        if not self._check_access(event):
-            return json.dumps({"success": False, "error": "当前会话无权使用 B站工具"}, ensure_ascii=False)
+        if denied := self._tool_denied(event):
+            return denied
         try:
             bvid = await self._resolve_tool_bvid(video)
             video_url = f"https://www.bilibili.com/video/{bvid}"
@@ -348,7 +432,7 @@ class BiliVideoPlugin(Star):
             )
             info, transcript = await asyncio.gather(info_task, transcript_task)
             content = self._transcript_tool_payload(transcript, max_chars)
-            return json.dumps(
+            return self._tool_json(
                 {
                     "success": True,
                     "bvid": bvid,
@@ -357,12 +441,264 @@ class BiliVideoPlugin(Star):
                     "uploader": (info or {}).get("owner_name", ""),
                     "duration": (info or {}).get("duration", 0),
                     **content,
-                },
-                ensure_ascii=False,
+                }
             )
         except Exception as e:
             logger.error(f"[BiliVideo/Tool] 提取视频内容失败: {e}", exc_info=True)
-            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+            return self._tool_json({"success": False, "error": str(e)})
+
+    @llm_tool("bilibili_get_user_info")
+    async def bilibili_get_user_info(
+        self,
+        event: AstrMessageEvent,
+        user: str,
+        include_videos: bool = False,
+        video_limit: int = 5,
+    ) -> str:
+        """获取 B站用户/UP主资料：昵称、签名、等级、粉丝、投稿数、认证、直播间，可选附带最新投稿。
+
+        Args:
+            user(string): UID、空间链接(space.bilibili.com/...) 或昵称；昵称会先搜索匹配用户。
+            include_videos(boolean): 可选。是否附带最新投稿视频，默认 false。
+            video_limit(number): 可选。最新投稿数量，范围 1-20，默认 5。
+
+        Returns:
+            str: JSON 格式的用户资料。
+        """
+        if denied := self._tool_denied(event):
+            return denied
+        cookies = self.bili_cookies or None
+        try:
+            mid = await self._resolve_tool_mid(user)
+            result = {"success": True, "user": await get_user_card(mid, cookies=cookies)}
+            try:
+                result["user"]["live_room"] = await get_user_live_room(mid, cookies=cookies)
+            except Exception as e:
+                self._log(f"[Tool] 获取用户直播间失败: {e}")
+            if include_videos:
+                videos = await get_latest_videos(
+                    mid, count=min(20, max(1, int(video_limit))), cookies=cookies
+                )
+                for video in videos:
+                    video["pubdate"] = format_ts(video.get("pubdate"))
+                    video["url"] = f"https://www.bilibili.com/video/{video['bvid']}"
+                result["latest_videos"] = videos
+                if not videos and not self.bili_cookies:
+                    result["latest_videos_note"] = (
+                        "B站未登录时投稿列表常被风控拦截；管理员可发送 /B站登录 扫码"
+                    )
+            return self._tool_json(result)
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 获取用户信息失败: {e}")
+            return self._tool_json({"success": False, "error": str(e)})
+
+    @llm_tool("bilibili_get_live_room")
+    async def bilibili_get_live_room(self, event: AstrMessageEvent, room: str) -> str:
+        """获取 B站直播间信息：标题、直播状态、开播时间、分区、人气、关注数、简介和主播资料。
+
+        Args:
+            room(string): 直播间号（支持短号）、直播间链接(live.bilibili.com/...)；也可传主播空间链接或 "UID:数字" 按主播查直播间。
+
+        Returns:
+            str: JSON 格式的直播间信息。
+        """
+        if denied := self._tool_denied(event):
+            return denied
+        cookies = self.bili_cookies or None
+        try:
+            value = (room or "").strip()
+            uid_match = re.fullmatch(r"(?i)uid[:：]?\s*(\d+)", value)
+            target = None
+            if not value.isdigit() and not uid_match:
+                target = await self._resolve_tool_target(value)
+            if value.isdigit():
+                room_id = int(value)
+            elif target and target[0] == "live":
+                room_id = int(target[1])
+            elif uid_match or (target and target[0] == "user"):
+                mid = uid_match.group(1) if uid_match else target[1]
+                user_room = await get_user_live_room(mid, cookies=cookies)
+                if not user_room:
+                    raise RuntimeError(f"用户 {mid} 没有开通直播间")
+                room_id = int(user_room["room_id"])
+            else:
+                raise ValueError("请提供直播间号、直播间链接、主播空间链接或 UID:数字")
+            return self._tool_json(
+                {"success": True, "live_room": await get_live_room(room_id, cookies=cookies)}
+            )
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 获取直播间信息失败: {e}")
+            return self._tool_json({"success": False, "error": str(e)})
+
+    @llm_tool("bilibili_get_bangumi_info")
+    async def bilibili_get_bangumi_info(
+        self,
+        event: AstrMessageEvent,
+        bangumi: str,
+        episode_offset: int = 0,
+        episode_limit: int = 30,
+    ) -> str:
+        """获取 B站番剧/影视（电影、电视剧、纪录片、国创、综艺）详情：简介、评分、播放数据、更新进度、声优/演职人员和分集列表。分集的评论区用 bilibili_get_comments，字幕/转写用 bilibili_get_video_content，传分集的 ep 链接或 BV 号即可。
+
+        Args:
+            bangumi(string): 剧集 ss 号、分集 ep 号、md 号或对应链接（如 bilibili.com/bangumi/play/ep123）。
+            episode_offset(number): 可选。分集列表起始位置，默认 0，用于长篇剧集翻页。
+            episode_limit(number): 可选。返回的分集数量，范围 1-100，默认 30。
+
+        Returns:
+            str: JSON 格式的剧集详情；传入 ep 时附带 current_episode。
+        """
+        if denied := self._tool_denied(event):
+            return denied
+        try:
+            kind, value = await self._resolve_tool_target(bangumi) or (None, None)
+            keys = {"season": "season_id", "episode": "ep_id", "media": "media_id"}
+            if kind not in keys:
+                raise ValueError("请提供番剧/影视的 ss、ep、md 号或对应链接")
+            season = await get_bangumi_season(
+                **{keys[kind]: int(value)}, cookies=self.bili_cookies or None
+            )
+            info = format_bangumi_season(season, episode_offset, episode_limit)
+            if kind == "episode":
+                info["current_episode"] = find_episode(season, int(value))
+            return self._tool_json({"success": True, "bangumi": info})
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 获取番剧信息失败: {e}")
+            return self._tool_json({"success": False, "error": str(e)})
+
+    @llm_tool("bilibili_get_article")
+    async def bilibili_get_article(
+        self,
+        event: AstrMessageEvent,
+        article: str,
+        max_chars: int = 20000,
+    ) -> str:
+        """获取 B站专栏文章或图文动态的详情与正文（图片以 [图片] 占位）。评论区用 bilibili_get_comments。
+
+        Args:
+            article(string): 专栏 cv 号、专栏链接(bilibili.com/read/cv...)、opus 链接(bilibili.com/opus/...) 或动态链接(t.bilibili.com/...)。
+            max_chars(number): 可选。正文最大字符数，范围 1000-50000，默认 20000。
+
+        Returns:
+            str: JSON 格式的文章信息和正文。
+        """
+        if denied := self._tool_denied(event):
+            return denied
+        cookies = self.bili_cookies or None
+        try:
+            kind, value = await self._resolve_tool_target(article) or (None, None)
+            if kind == "article":
+                data = await get_article(int(value), cookies=cookies)
+            elif kind == "opus":
+                data = await get_opus(value, cookies=cookies)
+            else:
+                raise ValueError("请提供专栏 cv 号、专栏链接、opus 链接或动态链接")
+            data.update(self._clip_text(data.get("content") or "", max_chars))
+            return self._tool_json({"success": True, "article": data})
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 获取专栏失败: {e}")
+            return self._tool_json({"success": False, "error": str(e)})
+
+    @llm_tool("bilibili_get_music")
+    async def bilibili_get_music(
+        self,
+        event: AstrMessageEvent,
+        song: str,
+        include_lyrics: bool = True,
+        max_chars: int = 10000,
+    ) -> str:
+        """获取 B站音频（au 号）详情和带时间轴的歌词。音乐区视频（BV 号）请用 bilibili_get_video_info / bilibili_get_video_content。
+
+        Args:
+            song(string): 音频 au 号或链接(bilibili.com/audio/au...)。
+            include_lyrics(boolean): 可选。是否返回歌词，默认 true。
+            max_chars(number): 可选。歌词最大字符数，范围 500-50000，默认 10000。
+
+        Returns:
+            str: JSON 格式的音频信息；若关联了视频会给出 bvid，可继续获取视频转写。
+        """
+        if denied := self._tool_denied(event):
+            return denied
+        try:
+            kind, value = await self._resolve_tool_target(song) or (None, None)
+            if kind == "video":
+                raise ValueError("这是视频 BV 号，请使用 bilibili_get_video_info / bilibili_get_video_content")
+            if kind != "audio":
+                raise ValueError("请提供音频 au 号或音频链接")
+            data = await get_audio(
+                int(value), include_lyrics=include_lyrics, cookies=self.bili_cookies or None
+            )
+            if include_lyrics:
+                lyrics = self._clip_text(data.pop("lyrics", ""), max_chars, low=500)
+                data["lyrics"] = lyrics["content"]
+                data["lyrics_truncated"] = lyrics["truncated"]
+            return self._tool_json({"success": True, "music": data})
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 获取音频失败: {e}")
+            return self._tool_json({"success": False, "error": str(e)})
+
+    @llm_tool("bilibili_get_comments")
+    async def bilibili_get_comments(
+        self,
+        event: AstrMessageEvent,
+        target: str,
+        limit: int = 10,
+        sort: str = "hot",
+        offset: str = "",
+    ) -> str:
+        """获取 B站评论区：视频、番剧/影视分集、专栏、图文动态、音频均可。返回主楼评论（含置顶标记、IP 属地、最多 3 条楼中楼）。
+
+        Args:
+            target(string): BV/av 号、视频链接、分集 ep 号/链接、专栏 cv 号/链接、opus/动态链接、音频 au 号/链接或 b23.tv 短链。
+            limit(number): 可选。每页主楼评论数量，范围 1-20，默认 10（首页置顶评论额外附加）。
+            sort(string): 可选。hot(按热度，默认，含置顶评论) 或 time(按时间最新)。
+            offset(string): 可选。翻页游标，填上一次结果中的 next_offset；首页留空。
+
+        Returns:
+            str: JSON 格式的评论列表。
+        """
+        if denied := self._tool_denied(event):
+            return denied
+        cookies = self.bili_cookies or None
+        try:
+            kind, value = await self._resolve_tool_target(target) or (None, None)
+            if kind == "video_aid":
+                oid, comment_type = int(value), 1
+            elif kind in ("video", "episode", "season"):
+                bvid = await self._resolve_tool_bvid(target)
+                info = await get_video_info(bvid, cookies=cookies)
+                if not info:
+                    raise RuntimeError(f"未找到视频 {bvid}")
+                oid, comment_type = int(info["aid"]), 1
+            elif kind == "article":
+                oid, comment_type = int(value), 12
+            elif kind == "audio":
+                oid, comment_type = int(value), 14
+            elif kind == "opus":
+                opus = await get_opus(value, cookies=cookies)
+                if not opus["comment_type"] or not opus["comment_oid"]:
+                    raise RuntimeError("该动态没有评论区")
+                oid, comment_type = int(opus["comment_oid"]), opus["comment_type"]
+            else:
+                raise ValueError("请提供视频、番剧分集、专栏、动态或音频的 ID/链接")
+            comments = await get_comments(
+                oid,
+                comment_type,
+                limit=limit,
+                sort=sort,
+                offset=offset,
+                cookies=cookies,
+            )
+            return self._tool_json(
+                {
+                    "success": True,
+                    "target": {"kind": kind, "id": value, "oid": oid, "comment_type": comment_type},
+                    "comments": self._guest_comment_note(comments),
+                }
+            )
+        except Exception as e:
+            logger.error(f"[BiliVideo/Tool] 获取评论失败: {e}")
+            return self._tool_json({"success": False, "error": str(e)})
 
     def _load_push_targets_from_config(self):
         """从配置文件加载推送目标到 SubscriptionManager"""
@@ -723,7 +1059,6 @@ class BiliVideoPlugin(Star):
         try:
             if hasattr(event, 'message_obj') and event.message_obj:
                 raw = getattr(event.message_obj, 'raw_message', None)
-                logger.info(f"[AutoDetect] raw_message type={type(raw).__name__}, truthy={bool(raw)}")
                 if raw:
                     bili_url = self._extract_bili_url_from_raw(raw)
 
@@ -769,8 +1104,6 @@ class BiliVideoPlugin(Star):
         # ---- 2. message_str 可能本身就是 JSON ----
         if not bili_url and not bvid and raw_msg.strip().startswith("{"):
             bili_url = self._try_parse_json_for_url(raw_msg.strip())
-
-        logger.info(f"[AutoDetect] 提取结果: bili_url={bili_url!r}, bvid={bvid}")
 
         # ---- 3. 如果从 JSON 拿到了 URL，提取 BV 号 ----
         if bili_url:
