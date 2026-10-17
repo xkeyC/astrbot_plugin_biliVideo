@@ -21,7 +21,7 @@
 
 ## 📖 简介
 
-**biliVideo** 是一款运行在 [AstrBot]((https://astrbot.app/)) 上的 B站视频总结插件。
+**biliVideo** 是一款运行在 [AstrBot](https://astrbot.app/) 上的 B站视频总结插件。
 
 你只需要丢一个B站视频链接，插件就会自动下载音频、提取字幕、调用 AI 大模型，生成一份结构化的视频总结 —— 并渲染成精美的暗色主题卡片图片发送到群聊。
 
@@ -40,13 +40,15 @@
 | 🔐 **扫码登录** | 在聊天中扫码登录B站，无需手动填写 Cookie |
 | 🛡️ **群聊权限控制** | 支持黑名单 / 白名单模式 |
 | 📱 **小程序链接识别** | 群里分享B站小程序/短链自动推送视频信息 |
+| 🎙️ **字幕 / ASR 双通道** | 平台字幕优先；无字幕时用必剪公共接口或自部署的 local-multimodal-infra 转写（可跟随 AstrBot 的本地多模态服务设置） |
+| 🤖 **Agent 工具** | 向 AstrBot Agent 提供搜索、视频、用户、直播、番剧、专栏、音频、评论等 B站工具 |
 
 ## 📦 安装
 
 ### 前置要求
 
-- [AstrBot]((https://astrbot.app/)) v4.0+
-- 已配置至少一个 LLM Provider（如 DeepSeek、OpenAI 等）
+- [AstrBot](https://astrbot.app/) v4.0+
+- 已在 AstrBot 中配置至少一个 LLM Provider（如 DeepSeek、OpenAI 等），或在插件配置中把 `llm_provider` 设为 `openai_compatible` 并填写自定义 OpenAI 兼容接口
 
 ### 步骤
 
@@ -160,57 +162,116 @@ apt install -y ffmpeg
 
 在 AstrBot 管理面板 → 插件配置中可设置：
 
+**ASR 与本地多模态服务**
+
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `output_image` | `true` | 总结以图片形式发送 |
-| `asr_provider` | `bcut` | 无平台字幕时使用 `bcut`（必剪公共接口）或 `local_multimodal_infra` |
-| `local_multimodal_infra_base_url` | `http://127.0.0.1:17890` | local-multimodal-infra Controller 地址 |
-| `local_multimodal_infra_token` | 空 | 可选推理 Bearer Token，对应服务端 `LOCAL_MCP_INFER_TOKENS` |
-| `local_multimodal_infra_model` | `sensevoice-small-onnx` | 本地 ASR 模型 |
-| `asr_timestamp_granularity_sec` | `10` | 本地 ASR 时间轴目标粒度 |
-| `asr_speaker_diarization` | `true` | 本地 ASR 说话人分离 |
+| `asr_provider` | `bcut` | ASR 提供商：`bcut`（必剪公共接口）或 `local_multimodal_infra`（本地多模态服务）。平台字幕始终优先，只有无字幕或 Agent 强制 `source=asr` 时才调用 ASR |
+| `local_multimodal_infra_base_url` | `http://127.0.0.1:17890` | local-multimodal-infra Controller 地址，不要包含 `/rpc/infer`；AstrBot 已启用本地多模态服务时忽略此项 |
+| `local_multimodal_infra_token` | 空 | 推理 Bearer Token，对应服务端 `LOCAL_MCP_INFER_TOKENS` 中的一个；服务未开启推理鉴权时留空。AstrBot 已启用本地多模态服务时使用那里的令牌 |
+| `local_multimodal_infra_model` | `sensevoice-small-onnx` | 本地 ASR 模型，建议使用能返回时间轴的 `sensevoice-small-onnx`；留空时使用 AstrBot 本地多模态服务中“语音识别”选用的模型 |
+| `asr_timeout` | `600` | ASR 超时时间（秒，30-1800），音频上传和推理的最长等待时间 |
+| `asr_timestamp_granularity_sec` | `10` | 本地 ASR 时间轴目标分段粒度（秒，1-120） |
+| `asr_speaker_diarization` | `true` | 本地 ASR 为时间轴片段添加 speaker 标签 |
+
+**LLM**
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `llm_provider` | `astrbot` | `astrbot` 使用 AstrBot 内置 LLM；`openai_compatible` 使用下方自定义 OpenAI 兼容接口 |
+| `llm_api_base` | 空 | OpenAI 兼容 API 地址，如 `https://api.openai.com/v1`（插件请求 `{llm_api_base}/chat/completions`） |
+| `llm_api_key` | 空 | OpenAI 兼容 API 密钥 |
+| `llm_model` | `gpt-4o-mini` | OpenAI 兼容 API 模型名 |
+
+**总结与输出**
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `output_image` | `true` | 总结以图片形式发送；关闭则发送纯文本 |
 | `mobile_output` | `false` | 移动端优化输出（更大字体、紧凑布局） |
+| `render_timeout` | `60` | 单张图片渲染超时（秒，10-300），超时回退到纯文本 |
 | `note_style` | `professional` | 总结风格：`concise` / `detailed` / `professional` |
-| `enable_link` | `true` | 嵌入时间戳标记 |
+| `enable_link` | `true` | 在总结中插入原片跳转时间戳 |
 | `enable_summary` | `true` | 末尾添加 AI 总结段落 |
-| `download_quality` | `fast` | 音频质量：`fast` / `medium` / `slow` |
-| `enable_auto_push` | `false` | 启用自动推送新视频总结 |
-| `check_interval_minutes` | `600` | 定时检查间隔（分钟） |
-| `max_subscriptions` | `20` | 每个群最大订阅数 |
-| `max_note_length` | `3000` | 总结最大字符数 |
-| `push_groups` | 空 | 推送QQ群列表，逗号分隔 |
-| `push_users` | 空 | 推送QQ号列表，逗号分隔 |
-| `access_mode` | `blacklist` | 群聊访问控制模式 |
-| `group_list` | 空 | 群号列表，逗号分隔 |
-| `enable_miniapp_detect` | `false` | 自动识别群内B站链接并推送视频信息 |
+| `download_quality` | `fast` | 音频质量：`fast`(32kbps) / `medium`(64kbps) / `slow`(128kbps) |
+| `max_note_length` | `3000` | 总结最大字符数（500-10000），超出自动截断 |
+| `enable_split_send` | `true` | 总结过长时分段发送；关闭则直接截断 |
+| `split_max_length` | `2500` | 分段发送时每段最大字符数（500-4000） |
+| `split_by_heading` | `true` | 分段时优先按 `##` 标题切分；关闭则按字符数硬切 |
+| `summary_progress_template` | `⏳ 正在生成总结，请稍候（可能需要1-3分钟）...` | 开始生成总结时的提示语 |
+| `processing_timeout` | `300` | 配置面板中仍保留此项，当前版本代码未使用 |
+
+**订阅与推送**
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `enable_auto_push` | `false` | 启用定时检查和自动推送新视频总结 |
+| `check_interval_minutes` | `600` | 定时检查间隔（分钟，5-1440） |
+| `max_subscriptions` | `20` | 每个会话最多订阅的 UP 主数量（1-100） |
+| `push_groups` | 空 | 推送 QQ 群列表，英文逗号分隔；也可用 `/添加推送群` 添加 |
+| `push_users` | 空 | 推送 QQ 号列表（私聊），英文逗号分隔；也可用 `/添加推送号` 添加 |
+
+**访问控制**
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `access_mode` | `blacklist` | 总结功能（命令与 Agent 工具）的访问控制模式：`blacklist` / `whitelist` |
+| `group_list` | 空 | 总结功能的黑/白名单群号，英文逗号分隔 |
+| `detect_access_mode` | `blacklist` | B站链接自动识别的访问控制模式：`blacklist` / `whitelist` |
+| `detect_group_list` | 空 | 链接识别的黑/白名单群号，英文逗号分隔 |
+
+**链接自动识别**
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `enable_miniapp_detect` | `false` | 自动识别群内B站链接（小程序、卡片、短链等）并推送视频信息；可用 `/识别开关` 实时切换 |
 | `detect_show_cover` | `true` | 推送时显示视频封面 |
-| `detect_show_uploader` | `true` | 推送时显示UP主名 |
-| `detect_show_desc` | `true` | 推送时显示视频简介 |
-| `detect_show_pubtime` | `true` | 推送时显示发布时间 |
-| `detect_show_link` | `true` | 推送时显示BV号链接 |
-| `detect_show_stats` | `true` | 推送时显示播放量等数据 |
-| `detect_auto_summary` | `false` | 识别链接后自动生成总结（消耗LLM额度） |
+| `detect_show_uploader` | `true` | 推送时显示UP主名（仅 `video_info_template` 为空时生效） |
+| `detect_show_desc` | `true` | 推送时显示视频简介，超 100 字截断（仅 `video_info_template` 为空时生效） |
+| `detect_show_pubtime` | `true` | 推送时显示发布时间（仅 `video_info_template` 为空时生效） |
+| `detect_show_link` | `true` | 推送时显示完整视频链接（仅 `video_info_template` 为空时生效） |
+| `detect_show_stats` | `true` | 推送时显示播放、弹幕、点赞数据（仅 `video_info_template` 为空时生效） |
+| `detect_auto_summary` | `false` | 识别链接后自动生成总结（消耗 LLM 额度） |
+| `video_info_template` | 见配置面板（非空） | 识别推送的视频信息模板，可用变量 `{title}` `{uploader}` `{desc}` `{pubdate}` `{view}` `{danmaku}` `{like}` `{url}` `{cover}`；非空时上面的 `detect_show_*`（封面除外）不再生效，清空后改用这些开关拼接 |
+
+**其他**
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
 | `debug_mode` | `false` | 启用调试日志 |
+
+## 🎙️ 本地 ASR（local-multimodal-infra）
+
+`asr_provider` 设为 `local_multimodal_infra` 后，无字幕视频会下载为 WAV，通过 `{服务地址}/rpc/infer` 的任务流程转写：`create_task`（`task_kind=asr.transcribe`）→ 签名 URL 上传音频 → `start_task`（`wait=true`），因此可保留 SenseVoice 的时间轴和说话人标签。
+
+服务地址、令牌和模型在**每次转写开始时**确定：
+
+1. **AstrBot 已启用本地多模态服务**（本 fork 的一级设置，WebUI：模型提供商 → 本地多模态服务；英文界面 Providers → Local service）：服务器地址和推理令牌使用 AstrBot 中的设置，插件的 `local_multimodal_infra_base_url` / `local_multimodal_infra_token` 被忽略；`local_multimodal_infra_model` 留空时使用 AstrBot 中“语音识别”选用的模型，有值时以插件配置为准。插件通过 AstrBot 提供给插件的客户端（`Context.get_local_infra()` / `astrbot.api.local_infra`）读取这些设置，修改后下一次转写即生效，无需重载插件。
+2. **AstrBot 未启用该服务，或 AstrBot 版本不提供该接口**（例如官方 AstrBot）：使用插件自己的地址、令牌和模型配置。
+
+两处都没有模型时回退到 `sensevoice-small-onnx`。注意 AstrBot 的设置只提供地址、令牌和模型，**不会切换 ASR 提供商**：要使用本地服务，仍需把 `asr_provider` 设为 `local_multimodal_infra`。
 
 ## 📋 系统依赖
 
 | 依赖 | 类型 | 用途 |
 |------|------|------|
 | **FFmpeg** | 系统 | 音频下载处理 (**必须**) |
-| **Playwright** | Python | 图片渲染（首次使用自动安装 Chromium） |
+| **Playwright** | Python | 图片渲染（首次使用图片输出时自动安装 Chromium） |
 | yt-dlp | Python | B站视频/音频下载 |
 | aiohttp | Python | 异步 HTTP 请求 |
 | requests | Python | HTTP 请求 |
 | markdown | Python | Markdown → HTML |
+| segno | Python | 生成 `/B站登录` 的二维码 |
+| latex2mathml | Python | 总结图片中的 LaTeX 公式渲染 |
 
-> **隐私提示**：`bcut` 会把音频上传到必剪公共接口。需要音频始终留在自有环境时，请选择 `local_multimodal_infra`。本地模式使用 `/rpc/infer` 的任务上传链路，因此可保留 SenseVoice 的时间轴和说话人标签。
+> **隐私提示**：`bcut` 会把音频上传到必剪公共接口。需要音频始终留在自有环境时，请选择 `local_multimodal_infra`。
 
-> Python 依赖和 Playwright Chromium 浏览器会在插件首次使用图片输出时自动安装。
+> Python 依赖由 AstrBot 在安装插件时按 `requirements.txt` 安装；Playwright Chromium 浏览器会在插件首次使用图片输出时自动安装。
 
 ## ⚠️ 注意事项
 
-- 首次使用必须先执行 `/B站登录`
-- 需要在 AstrBot 中配置好 LLM Provider
+- 建议首次使用先执行 `/B站登录`：插件不强制登录，但未登录时字幕、评论、投稿列表、专栏正文等接口容易被 B站风控拦截或只返回部分内容
+- 需要在 AstrBot 中配置好 LLM Provider（或使用 `llm_provider=openai_compatible` 的自定义接口）
 - 视频总结生成约需 1-3 分钟
 - 图片渲染失败时会自动回退到纯文本
 
@@ -245,13 +306,15 @@ You can also **subscribe to content creators** and receive automatic summary pus
 | 🔐 **QR Login** | Login to Bilibili by scanning a QR code in chat |
 | 🛡️ **Access Control** | Blacklist / whitelist modes |
 | 📱 **Mini-App Detection** | Auto-detect Bilibili links shared in chat and push video info |
+| 🎙️ **Subtitles / ASR** | Platform subtitles first; otherwise transcribe with the public Bcut API or a self-hosted local-multimodal-infra (can follow AstrBot's local multimodal service setting) |
+| 🤖 **Agent Tools** | Bilibili search, video, user, live, bangumi, article, audio, and comment tools for the AstrBot Agent |
 
 ## 📦 Installation
 
 ### Prerequisites
 
-- [AstrBot]((https://astrbot.app/)) v4.0+
-- At least one LLM Provider configured (e.g., DeepSeek, OpenAI)
+- [AstrBot](https://astrbot.app/) v4.0+
+- At least one LLM Provider configured in AstrBot (e.g., DeepSeek, OpenAI), or set `llm_provider` to `openai_compatible` and fill in a custom OpenAI-compatible API
 
 ### Steps
 
@@ -286,7 +349,8 @@ Scan the QR code with the Bilibili mobile app.
 | Command | Description |
 |---------|-------------|
 | `/总结帮助` | Show help info and login status |
-| `/总结 <video URL>` | Generate AI summary for a video |
+| `/总结 <video URL>` | Generate AI summary for a video (reuses an existing summary) |
+| `/重新总结 <video URL>` | Ignore the existing summary record and generate a new one |
 | `/最新视频 <creator>` | Get latest video from a creator and summarize |
 | `/B站登录` | QR code login to Bilibili |
 | `/B站登出` | Logout from Bilibili |
@@ -325,34 +389,59 @@ If an `@bot` mention or wake keyword and a Bilibili link occur in the same messa
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `asr_provider` | `bcut` | `bcut` (public Bcut API) or `local_multimodal_infra`; platform subtitles always come first, ASR runs only without subtitles or when the Agent forces `source=asr` |
+| `local_multimodal_infra_base_url` | `http://127.0.0.1:17890` | local-multimodal-infra Controller URL, without `/rpc/infer`; ignored when AstrBot's local multimodal service is on |
+| `local_multimodal_infra_token` | empty | Inference Bearer token (one of the server's `LOCAL_MCP_INFER_TOKENS`); AstrBot's token is used when its local multimodal service is on |
+| `local_multimodal_infra_model` | `sensevoice-small-onnx` | Local ASR model ID; when empty, the speech recognition model chosen in AstrBot's local multimodal service is used |
+| `asr_timeout` | `600` | ASR timeout in seconds (30-1800) |
+| `asr_timestamp_granularity_sec` | `10` | Local ASR timestamp granularity in seconds (1-120) |
+| `asr_speaker_diarization` | `true` | Local ASR speaker labels |
+| `llm_provider` | `astrbot` | `astrbot` (AstrBot's LLM) or `openai_compatible` |
+| `llm_api_base` / `llm_api_key` / `llm_model` | empty / empty / `gpt-4o-mini` | OpenAI-compatible API used when `llm_provider=openai_compatible` |
 | `output_image` | `true` | Send summary as image |
-| `asr_provider` | `bcut` | Use the public Bcut API or `local_multimodal_infra` when subtitles are unavailable |
-| `local_multimodal_infra_base_url` | `http://127.0.0.1:17890` | local-multimodal-infra Controller URL |
-| `local_multimodal_infra_token` | empty | Optional inference Bearer token |
-| `local_multimodal_infra_model` | `sensevoice-small-onnx` | Local ASR model ID |
 | `mobile_output` | `false` | Mobile-optimized output (larger font, compact layout) |
+| `render_timeout` | `60` | Per-image render timeout in seconds; falls back to plain text |
 | `note_style` | `professional` | Style: `concise` / `detailed` / `professional` |
-| `enable_auto_push` | `false` | Enable automatic new video push |
-| `check_interval_minutes` | `600` | Check interval in minutes |
-| `max_subscriptions` | `20` | Max subscriptions per group |
+| `enable_link` | `true` | Insert timestamp jump markers |
+| `enable_summary` | `true` | Append an AI summary section |
 | `download_quality` | `fast` | Audio quality: `fast` / `medium` / `slow` |
+| `max_note_length` | `3000` | Max summary length; longer text is truncated |
+| `enable_split_send` / `split_max_length` / `split_by_heading` | `true` / `2500` / `true` | Split long summaries into parts (by `##` headings first) |
+| `summary_progress_template` | see panel | Message shown when summarizing starts |
+| `processing_timeout` | `300` | Still in the config panel, not used by the current code |
+| `enable_auto_push` | `false` | Enable automatic new video push |
+| `check_interval_minutes` | `600` | Check interval in minutes (5-1440) |
+| `max_subscriptions` | `20` | Max subscriptions per session |
 | `push_groups` | empty | Push target QQ groups, comma-separated |
 | `push_users` | empty | Push target QQ users, comma-separated |
-| `access_mode` | `blacklist` | Group access control mode |
-| `enable_miniapp_detect` | `false` | Auto-detect Bilibili links in chat |
+| `access_mode` / `group_list` | `blacklist` / empty | Access control for summaries (commands and Agent tools) |
+| `detect_access_mode` / `detect_group_list` | `blacklist` / empty | Access control for link auto-detection |
+| `enable_miniapp_detect` | `false` | Auto-detect Bilibili links in chat (toggle live with `/识别开关`) |
 | `detect_show_cover` | `true` | Show video cover in push |
-| `detect_show_uploader` | `true` | Show uploader name in push |
-| `detect_show_desc` | `true` | Show video description in push |
-| `detect_show_pubtime` | `true` | Show publish time in push |
-| `detect_show_link` | `true` | Show BV link in push |
-| `detect_show_stats` | `true` | Show view/danmaku/like counts |
+| `detect_show_uploader` / `detect_show_desc` / `detect_show_pubtime` / `detect_show_link` / `detect_show_stats` | `true` | Fields of the pushed info; only used when `video_info_template` is empty |
+| `video_info_template` | see panel (non-empty) | Template of the pushed video info (`{title}` `{uploader}` `{desc}` `{pubdate}` `{view}` `{danmaku}` `{like}` `{url}` `{cover}`) |
 | `detect_auto_summary` | `false` | Auto-generate summary on link detect |
 | `debug_mode` | `false` | Enable debug logging |
 
+## 🎙️ Local ASR (local-multimodal-infra)
+
+With `asr_provider=local_multimodal_infra`, videos without subtitles are downloaded as WAV and transcribed through `{server}/rpc/infer` (`create_task` → signed upload → `start_task`), keeping SenseVoice timestamps and speaker labels.
+
+The server, token, and model are resolved **at the start of each transcription**:
+
+1. **AstrBot's local multimodal service is on** (a first-tier setting of this fork; WebUI: Providers → Local service): the server address and inference token come from AstrBot and the plugin's own address/token are ignored; an empty `local_multimodal_infra_model` uses AstrBot's speech recognition model. The plugin reads this through the client AstrBot gives plugins (`Context.get_local_infra()` / `astrbot.api.local_infra`), so changes apply to the next transcription without reloading.
+2. **Otherwise** (service off, or an AstrBot version without it): the plugin's own settings are used.
+
+With no model anywhere, `sensevoice-small-onnx` is used. AstrBot's setting does not switch the ASR provider: `asr_provider` must still be `local_multimodal_infra`.
+
+## 📋 Dependencies
+
+FFmpeg (system, required); Python: playwright, yt-dlp, aiohttp, requests, markdown, segno (login QR code), latex2mathml (formula rendering). Python packages are installed by AstrBot from `requirements.txt`; Playwright Chromium is installed automatically on first image output.
+
 ## ⚠️ Notes
 
-- Must run `/B站登录` before first use
-- Requires an LLM Provider configured in AstrBot
+- Logging in with `/B站登录` first is recommended: it is not required, but guests are often blocked or get partial results from Bilibili (subtitles, comments, upload lists, article bodies)
+- Requires an LLM Provider configured in AstrBot (or `llm_provider=openai_compatible`)
 - Summary generation takes ~1-3 minutes per video
 - Falls back to plain text if image rendering fails
 - `bcut` uploads audio to a public service; select `local_multimodal_infra` to keep ASR in your own environment
