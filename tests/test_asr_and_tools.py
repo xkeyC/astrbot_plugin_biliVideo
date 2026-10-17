@@ -590,3 +590,22 @@ async def test_get_video_comments_parses_pinned_and_sub_replies(monkeypatch):
     assert result["comments"][0]["pinned"] is True
     assert len(result["comments"][1]["replies"]) == 3
     assert result["comments"][1]["location"] == "IP属地：上海"
+
+
+def test_local_infra_settings_follow_astrbot_when_it_has_them(monkeypatch):
+    plugin = BiliVideoPlugin.__new__(BiliVideoPlugin)
+    plugin.config = {
+        "local_multimodal_infra_base_url": "http://plugin:1",
+        "local_multimodal_infra_token": "p",
+        "local_multimodal_infra_model": "",
+    }
+    local_infra = pytest.importorskip("astrbot.api.local_infra")
+    monkeypatch.setattr(local_infra, "get_local_infra", lambda: None)
+    assert plugin._local_infra_settings() == ("http://plugin:1", "p", "")
+
+    infra = SimpleNamespace(base_url="http://core:17890", token="c")
+    monkeypatch.setattr(local_infra, "get_local_infra", lambda: infra)
+    monkeypatch.setattr(local_infra, "service_model", lambda name: {"model": "sv"})
+    assert plugin._local_infra_settings() == ("http://core:17890", "c", "sv")
+    plugin.config["local_multimodal_infra_model"] = "mine"
+    assert plugin._local_infra_settings()[2] == "mine"

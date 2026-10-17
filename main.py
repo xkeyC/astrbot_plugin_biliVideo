@@ -99,25 +99,17 @@ class BiliVideoPlugin(Star):
         self._log(f"B站链接识别访问控制: mode={self.detect_access_mode}, group_list={self.detect_group_list}")
 
         # 初始化服务
+        local_infra_base_url, local_infra_token, local_infra_model = (
+            self._local_infra_settings()
+        )
         self.subscription_mgr = SubscriptionManager(self.data_dir)
         self.note_service = NoteService(
             data_dir=self.data_dir,
             cookies=self.bili_cookies if self.bili_cookies else None,
             asr_provider=str(self.config.get("asr_provider", "bcut")),
-            local_infra_base_url=str(
-                self.config.get(
-                    "local_multimodal_infra_base_url",
-                    "http://127.0.0.1:17890",
-                )
-            ),
-            local_infra_token=str(
-                self.config.get("local_multimodal_infra_token", "")
-            ),
-            local_infra_model=str(
-                self.config.get(
-                    "local_multimodal_infra_model", "sensevoice-small-onnx"
-                )
-            ),
+            local_infra_base_url=local_infra_base_url,
+            local_infra_token=local_infra_token,
+            local_infra_model=local_infra_model,
             asr_timeout=int(self.config.get("asr_timeout", 600)),
             timestamp_granularity_sec=int(
                 self.config.get("asr_timestamp_granularity_sec", 10)
@@ -719,6 +711,33 @@ class BiliVideoPlugin(Star):
                 if uid and uid.isdigit():
                     origin = f"{prefix}:FriendMessage:{uid}"
                     self.subscription_mgr.add_push_target(origin, f"QQ{uid}")
+
+    def _local_infra_settings(self) -> tuple[str, str, str]:
+        """local-multimodal-infra 的地址、令牌与 ASR 模型。
+
+        AstrBot 已在“模型提供商 → 本地多模态服务”中启用本地多模态服务时使用
+        那里的地址和令牌（ASR 模型留空时也用那里“语音识别”选用的模型），
+        否则使用本插件自己的配置。
+        """
+        base_url = str(
+            self.config.get(
+                "local_multimodal_infra_base_url", "http://127.0.0.1:17890"
+            )
+        )
+        token = str(self.config.get("local_multimodal_infra_token", ""))
+        model = str(
+            self.config.get("local_multimodal_infra_model", "sensevoice-small-onnx")
+        ).strip()
+        try:
+            from astrbot.api.local_infra import get_local_infra, service_model
+        except ImportError:  # AstrBot 不带一级本地多模态服务
+            return base_url, token, model
+        infra = get_local_infra()
+        if infra is None:
+            return base_url, token, model
+        if not model:
+            model = service_model("stt").get("model") or ""
+        return infra.base_url, infra.token, model
 
     @staticmethod
     def _parse_list(text: str) -> set:

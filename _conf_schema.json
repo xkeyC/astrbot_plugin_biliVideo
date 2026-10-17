@@ -19,19 +19,19 @@
     "description": "local-multimodal-infra 地址",
     "type": "string",
     "default": "http://127.0.0.1:17890",
-    "hint": "Controller 地址，不要包含 /rpc/infer 路径"
+    "hint": "Controller 地址，不要包含 /rpc/infer 路径。AstrBot 已在“模型提供商 → 本地多模态服务”中启用本地多模态服务时忽略此项，使用那里的地址"
   },
   "local_multimodal_infra_token": {
     "description": "local-multimodal-infra 推理令牌",
     "type": "string",
     "default": "",
-    "hint": "对应 LOCAL_MCP_INFER_TOKENS 中的一个令牌；服务未启用推理鉴权时留空"
+    "hint": "对应 LOCAL_MCP_INFER_TOKENS 中的一个令牌；服务未启用推理鉴权时留空。AstrBot 已启用本地多模态服务时使用那里的令牌"
   },
   "local_multimodal_infra_model": {
     "description": "local-multimodal-infra ASR 模型",
     "type": "string",
     "default": "sensevoice-small-onnx",
-    "hint": "建议使用能返回时间轴的 sensevoice-small-onnx"
+    "hint": "建议使用能返回时间轴的 sensevoice-small-onnx。留空时使用 AstrBot 本地多模态服务中“语音识别”选用的模型"
   },
   "asr_timeout": {
     "description": "ASR 超时时间（秒）",
