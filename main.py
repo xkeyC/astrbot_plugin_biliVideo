@@ -117,6 +117,7 @@ class BiliVideoPlugin(Star):
             speaker_diarization=bool(
                 self.config.get("asr_speaker_diarization", True)
             ),
+            local_infra_settings=self._local_infra_settings,
         )
 
         # 从配置加载推送目标（与命令添加的合并，不重复）

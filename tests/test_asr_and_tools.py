@@ -609,3 +609,32 @@ def test_local_infra_settings_follow_astrbot_when_it_has_them(monkeypatch):
     assert plugin._local_infra_settings() == ("http://core:17890", "c", "sv")
     plugin.config["local_multimodal_infra_model"] = "mine"
     assert plugin._local_infra_settings()[2] == "mine"
+
+
+@pytest.mark.asyncio
+async def test_local_asr_takes_astrbots_current_server_on_each_transcription(
+    tmp_path: Path,
+):
+    current = {"value": ("http://first:1/", "t1", "")}
+    service = NoteService(
+        str(tmp_path),
+        asr_provider="local_multimodal_infra",
+        local_infra_settings=lambda: current["value"],
+    )
+    seen = []
+    service.transcriber.transcript = lambda path: seen.append(
+        (
+            service.transcriber.base_url,
+            service.transcriber.token,
+            service.transcriber.model,
+        )
+    )
+
+    await service._transcribe_audio("a.wav")
+    current["value"] = ("http://second:2", "t2", "sv-gpu")
+    await service._transcribe_audio("a.wav")
+
+    assert seen == [
+        ("http://first:1", "t1", "sensevoice-small-onnx"),
+        ("http://second:2", "t2", "sv-gpu"),
+    ]

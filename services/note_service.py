@@ -32,7 +32,11 @@ class NoteService:
         asr_timeout: int = 600,
         timestamp_granularity_sec: int = 10,
         speaker_diarization: bool = True,
+        local_infra_settings=None,
     ):
+        # Returns (base_url, token, model) as of now: AstrBot's
+        # local-multimodal-infra setting can change while the plugin runs.
+        self.local_infra_settings = local_infra_settings
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
         self._asr_lock = asyncio.Lock()
@@ -62,6 +66,14 @@ class NoteService:
         if not hasattr(self, "_asr_lock"):
             self._asr_lock = asyncio.Lock()
         async with self._asr_lock:
+            refresh = getattr(self, "local_infra_settings", None)
+            if refresh and isinstance(
+                self.transcriber, LocalMultimodalInfraTranscriber
+            ):
+                base_url, token, model = refresh()
+                self.transcriber.base_url = base_url.rstrip("/")
+                self.transcriber.token = token.strip()
+                self.transcriber.model = model.strip() or "sensevoice-small-onnx"
             return await asyncio.get_running_loop().run_in_executor(
                 None, lambda: self.transcriber.transcript(file_path)
             )
